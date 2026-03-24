@@ -14,6 +14,35 @@ from mycellm.activity import EventType
 router = APIRouter()
 
 
+@router.get("/version")
+async def node_version(request: Request):
+    """Get current version and check for updates."""
+    from mycellm import __version__
+    result = {"current": __version__, "latest": None, "update_available": False}
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get("https://pypi.org/pypi/mycellm/json")
+            if resp.status_code == 200:
+                latest = resp.json().get("info", {}).get("version", "")
+                if latest:
+                    result["latest"] = latest
+                    result["update_available"] = _is_newer(latest, __version__)
+    except Exception:
+        pass  # offline or not published yet
+    return result
+
+
+def _is_newer(latest: str, current: str) -> bool:
+    """Check if latest version is newer than current using tuple comparison."""
+    try:
+        def parse(v):
+            return tuple(int(x) for x in v.split(".")[:3])
+        return parse(latest) > parse(current)
+    except (ValueError, TypeError):
+        return False
+
+
 @router.get("/status")
 async def node_status(request: Request):
     """Get comprehensive node status."""
@@ -712,14 +741,30 @@ async def public_stats(request: Request):
     total_ram_gb += sys_info.get("memory", {}).get("total_gb", 0)
     total_tps = node.activity.tps if hasattr(node, "activity") else 0
 
-    # Models (no sensitive info)
+    # Models (no sensitive info) — with tier classification
+    from mycellm.protocol.capabilities import classify_tier, TIER_NAMES
     model_names = set()
+    models_by_tier: dict[int, list[dict]] = {1: [], 2: [], 3: []}
+    seen_models = set()
+
     for m in node.inference.loaded_models:
         model_names.add(m.name)
+        if m.name not in seen_models:
+            tier = classify_tier(m.param_count_b)
+            models_by_tier[tier].append({
+                "name": m.name, "tier": tier, "param_b": m.param_count_b,
+            })
+            seen_models.add(m.name)
+
     for entry in approved_nodes:
         for m in entry.get("capabilities", {}).get("models", []):
             name = m.get("name", m) if isinstance(m, dict) else m
             model_names.add(name)
+            if name not in seen_models:
+                param_b = m.get("param_count_b", 0) if isinstance(m, dict) else 0
+                tier = classify_tier(param_b)
+                models_by_tier[tier].append({"name": name, "tier": tier, "param_b": param_b})
+                seen_models.add(name)
 
     # Activity stats — combine local stats with telemetry from announcing nodes
     local_stats = node.activity.stats() if hasattr(node, "activity") else {}
@@ -769,6 +814,11 @@ async def public_stats(request: Request):
             ),
             "unique": len(model_names),
             "names": sorted(model_names),
+            "by_tier": {
+                "tier1": [m["name"] for m in models_by_tier[1]],
+                "tier2": [m["name"] for m in models_by_tier[2]],
+                "tier3": [m["name"] for m in models_by_tier[3]],
+            },
         },
         "activity": {
             "total_requests": network_requests,

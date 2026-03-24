@@ -1,4 +1,46 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } from 'react'
+import { marked } from 'marked'
+import hljs from 'highlight.js/lib/core'
+import javascript from 'highlight.js/lib/languages/javascript'
+import python from 'highlight.js/lib/languages/python'
+import bash from 'highlight.js/lib/languages/bash'
+import json from 'highlight.js/lib/languages/json'
+import typescript from 'highlight.js/lib/languages/typescript'
+import sql from 'highlight.js/lib/languages/sql'
+import yaml from 'highlight.js/lib/languages/yaml'
+import css from 'highlight.js/lib/languages/css'
+import xml from 'highlight.js/lib/languages/xml'
+import rust from 'highlight.js/lib/languages/rust'
+import go from 'highlight.js/lib/languages/go'
+import 'highlight.js/styles/github-dark-dimmed.css'
+
+hljs.registerLanguage('javascript', javascript)
+hljs.registerLanguage('js', javascript)
+hljs.registerLanguage('python', python)
+hljs.registerLanguage('py', python)
+hljs.registerLanguage('bash', bash)
+hljs.registerLanguage('sh', bash)
+hljs.registerLanguage('shell', bash)
+hljs.registerLanguage('json', json)
+hljs.registerLanguage('typescript', typescript)
+hljs.registerLanguage('ts', typescript)
+hljs.registerLanguage('sql', sql)
+hljs.registerLanguage('yaml', yaml)
+hljs.registerLanguage('yml', yaml)
+hljs.registerLanguage('css', css)
+hljs.registerLanguage('html', xml)
+hljs.registerLanguage('xml', xml)
+hljs.registerLanguage('rust', rust)
+hljs.registerLanguage('go', go)
+
+marked.setOptions({
+  highlight: (code, lang) => {
+    if (lang && hljs.getLanguage(lang)) return hljs.highlight(code, { language: lang }).value
+    return hljs.highlightAuto(code).value
+  },
+  breaks: true,
+  gfm: true,
+})
 import {
   Terminal, Activity, Server, Globe, Cpu, Database, Zap, Shield, Key,
   Send, Plus, Trash2, RefreshCw, MessageSquare, BarChart3, Network,
@@ -1503,6 +1545,7 @@ function NetworkTab({ status }) {
                     <span className="font-mono text-sm font-medium">{rn.node_name || 'unnamed'}</span>
                     <span className="font-mono text-xs text-gray-500">{rn.api_addr}</span>
                     <span className="font-mono text-xs text-gray-600">{rn.peer_id?.slice(0, 12)}...</span>
+                    {sys.mycellm_version && <span className="font-mono text-[10px] text-gray-700">v{sys.mycellm_version}</span>}
                   </div>
                   <div className="flex items-center space-x-2">
                     {isPending && (
@@ -2626,6 +2669,7 @@ function ChatTab() {
   const [models, setModels] = useState([])
   const [sending, setSending] = useState(false)
   const [showRouting, setShowRouting] = useState(false)
+  const abortRef = useRef(null)
   const [routingOpts, setRoutingOpts] = useState({
     min_tier: '', required_tags: [], routing: 'best', fallback: 'downgrade'
   })
@@ -2643,20 +2687,88 @@ function ChatTab() {
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
 
+  // Slash command handlers
+  const slashCommands = {
+    help: { help: 'Show available commands', fn: async () => {
+      const lines = Object.entries(slashCommands).map(([k,v]) => `**/${k}** — ${v.help}`).join('\n')
+      return `### Commands\n${lines}\n\nType normally to chat.`
+    }},
+    status: { help: 'Show node status', fn: async () => {
+      const d = await api('/v1/node/status')
+      const hw = d.hardware || {}
+      return `**${d.node_name}** (${d.mode})\n- Peer: \`${(d.peer_id||'').slice(0,20)}...\`\n- Uptime: ${_fmtUp(d.uptime_seconds)}\n- Models: ${(d.models||[]).length}\n- Peers: ${(d.peers||[]).length}\n- Hardware: ${hw.gpu || 'CPU'} (${hw.vram_gb || 0}GB ${hw.backend || 'cpu'})`
+    }},
+    models: { help: 'List loaded models', fn: async () => {
+      const d = await api('/v1/models')
+      const m = d.data || []
+      if (!m.length) return '*No models loaded.*'
+      return `**${m.length} model(s):**\n` + m.map(x => `- \`${x.id}\` (${x.owned_by || 'local'})`).join('\n')
+    }},
+    credits: { help: 'Show credit balance', fn: async () => {
+      const d = await api('/v1/node/credits')
+      return `**Credits**\n- Balance: **${(d.balance||0).toFixed(2)}**\n- Earned: +${(d.earned||0).toFixed(2)}\n- Spent: -${(d.spent||0).toFixed(2)}`
+    }},
+    fleet: { help: 'Show fleet nodes', fn: async () => {
+      const d = await api('/v1/admin/nodes')
+      const nodes = d.nodes || []
+      if (!nodes.length) return '*No fleet nodes registered.*'
+      return `**${nodes.length} fleet node(s):**\n` + nodes.map(n => {
+        const st = n.online ? '🟢' : n.status === 'pending' ? '🟡' : '🔴'
+        const mods = (n.capabilities?.models || []).map(m => m.name || m).join(', ')
+        return `- ${st} **${n.node_name}** \`${n.api_addr}\` ${mods ? '— ' + mods : ''}`
+      }).join('\n')
+    }},
+    config: { help: 'Show node configuration', fn: async () => {
+      const d = await api('/v1/node/debug/config')
+      return `**Configuration**\n` + Object.entries(d).map(([k,v]) => `- ${k}: \`${v}\``).join('\n')
+    }},
+    clear: { help: 'Clear conversation', fn: async () => '__clear__' },
+  }
+
+  function _fmtUp(s) { const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60); return d>0?`${d}d ${h}h ${m}m`:h>0?`${h}h ${m}m`:`${m}m`; }
+
   const send = async () => {
     if (!input.trim() || sending) return
-    const userMsg = { role: 'user', content: input.trim() }
-    const history = [...messages, userMsg]
-    setMessages(history)
+    const text = input.trim()
     setInput('')
+
+    // Slash command dispatch
+    if (text.startsWith('/')) {
+      const [cmdName, ...rest] = text.slice(1).split(/\s+/)
+      const cmd = slashCommands[cmdName?.toLowerCase()]
+      if (cmd) {
+        const userMsg = { role: 'user', content: text, isCommand: true }
+        setMessages(prev => [...prev, userMsg])
+        setSending(true)
+        try {
+          const result = await cmd.fn(rest.join(' '))
+          if (result === '__clear__') {
+            setMessages([])
+            setSending(false)
+            return
+          }
+          setMessages(prev => [...prev, { role: 'assistant', content: result, isCommand: true }])
+        } catch (e) {
+          setMessages(prev => [...prev, { role: 'assistant', content: `*Error: ${e.message}*`, isCommand: true }])
+        }
+        setSending(false)
+        return
+      }
+    }
+
+    const userMsg = { role: 'user', content: text }
+    const history = [...messages.filter(m => !m.isCommand), userMsg]
+    setMessages(prev => [...prev, userMsg])
     setSending(true)
+    const controller = new AbortController()
+    abortRef.current = controller
 
     try {
       const resp = await api('/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: model === 'auto' ? '' : model,  // empty = auto-route
+          model: model === 'auto' ? '' : model,
           messages: history.map(m => ({ role: m.role, content: m.content })),
           max_tokens: 2048,
           ...(model === 'auto' && (routingOpts.min_tier || routingOpts.required_tags.length > 0) ? {
@@ -2668,17 +2780,22 @@ function ChatTab() {
             }
           } : {}),
         }),
+        signal: controller.signal,
       })
-      const text = resp.choices?.[0]?.message?.content || '[no response]'
+      const respText = resp.choices?.[0]?.message?.content || '[no response]'
       const usage = resp.usage || {}
       const routedTo = resp.model || 'unknown'
-      setMessages([...history, {
-        role: 'assistant', content: text, model: routedTo,
+      setMessages(prev => [...prev, {
+        role: 'assistant', content: respText, model: routedTo,
         tokens: `${usage.prompt_tokens || 0}+${usage.completion_tokens || 0}`,
       }])
     } catch (e) {
-      setMessages([...history, { role: 'assistant', content: `[Error: ${e.message}]` }])
+      if (e.name !== 'AbortError') {
+        setMessages(prev => [...prev, { role: 'assistant', content: `*Error: ${e.message}*` }])
+        setInput(text)
+      }
     }
+    abortRef.current = null
     setSending(false)
   }
 
@@ -2788,7 +2905,10 @@ function ChatTab() {
                 ? 'bg-relay/20 text-white border border-relay/20'
                 : 'bg-black border border-white/10 text-gray-200'
             }`}>
-              <div className="whitespace-pre-wrap">{m.content}</div>
+              {m.role === 'user'
+                ? <div className="whitespace-pre-wrap">{m.content}</div>
+                : <div className="chat-md" dangerouslySetInnerHTML={{ __html: marked.parse(m.content || '') }} />
+              }
               {m.model && (
                 <div className="mt-2 pt-2 border-t border-white/5 text-xs text-gray-500 flex flex-wrap gap-x-3 gap-y-0.5">
                   <span>via {m.model}</span>
@@ -2801,8 +2921,10 @@ function ChatTab() {
         ))}
         {sending && (
           <div className="flex justify-start">
-            <div className="bg-black border border-white/10 rounded-xl px-4 py-3">
-              <Loader2 size={16} className="animate-spin text-spore" />
+            <div className="bg-black border border-white/10 rounded-xl px-4 py-3 flex items-center space-x-1.5">
+              <span className="w-2 h-2 rounded-full bg-spore animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-spore animate-pulse" style={{animationDelay: '0.2s'}} />
+              <span className="w-2 h-2 rounded-full bg-spore animate-pulse" style={{animationDelay: '0.4s'}} />
             </div>
           </div>
         )}
@@ -2814,12 +2936,20 @@ function ChatTab() {
         <div className="flex space-x-2">
           <input value={input} onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && !e.shiftKey && send()}
-            placeholder="Type a message..."
+            placeholder="Type a message or /help for commands..."
             className="flex-grow bg-black border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:border-spore/50 focus:outline-none" />
-          <button onClick={send} disabled={sending || !input.trim()}
-            className="bg-spore text-black px-4 py-2 rounded-lg text-sm font-medium hover:bg-spore/90 disabled:opacity-40 transition-all">
-            <Send size={14} />
-          </button>
+          {sending ? (
+            <button onClick={() => { abortRef.current?.abort(); setSending(false) }}
+              className="bg-compute text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-compute/80 transition-all"
+              title="Stop generation">
+              <X size={14} />
+            </button>
+          ) : (
+            <button onClick={send} disabled={!input.trim()}
+              className="bg-spore text-black px-4 py-2 rounded-lg text-sm font-medium hover:bg-spore/90 disabled:opacity-40 transition-all">
+              <Send size={14} />
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -3240,6 +3370,7 @@ export default function App() {
   const [refreshTick, setRefreshTick] = useState(0)
   const [fleetCount, setFleetCount] = useState(0)
   const [liveActivityEvents, setLiveActivityEvents] = useState([])
+  const [versionInfo, setVersionInfo] = useState({ current: null, latest: null, update_available: false })
   const nodeRegistry = useManagedNodes()
 
   const triggerRefresh = useCallback(() => setRefreshTick(t => t + 1), [])
@@ -3248,6 +3379,7 @@ export default function App() {
   useEffect(() => {
     if (appState !== 'checking') return
     fetch('/health').then(r => r.json()).then(d => {
+      if (d.version) setVersionInfo(v => ({ ...v, current: d.version }))
       if (d.auth_required) {
         // Try stored key
         const stored = getApiKey()
@@ -3260,6 +3392,15 @@ export default function App() {
         setAppState('booting')
       }
     }).catch(() => setAppState('booting'))  // node offline, skip auth
+  }, [appState])
+
+  // Fetch version info (once on mount + every 6 hours)
+  useEffect(() => {
+    if (appState !== 'dashboard') return
+    const fetchVersion = () => api('/v1/node/version').then(setVersionInfo).catch(() => {})
+    fetchVersion()
+    const iv = setInterval(fetchVersion, 6 * 60 * 60 * 1000)
+    return () => clearInterval(iv)
   }, [appState])
 
   // Poll status + credits
@@ -3412,6 +3553,24 @@ export default function App() {
           {tab === 'logs' && <LogsTab logs={logs} />}
           {tab === 'settings' && <SettingsTab />}
         </main>
+
+        {/* Footer */}
+        <footer className="border-t border-white/5 bg-void/60 relative z-10">
+          <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between text-[11px] font-mono text-gray-600">
+            <div className="flex items-center space-x-2">
+              <span>mycellm v{versionInfo.current || '...'}</span>
+              {versionInfo.update_available && (
+                <span className="text-ledger bg-ledger/10 px-1.5 py-0.5 rounded text-[10px]">
+                  v{versionInfo.latest} available
+                </span>
+              )}
+            </div>
+            <div className="flex items-center space-x-3">
+              <a href="/metrics" target="_blank" className="hover:text-gray-400">metrics</a>
+              <a href="/docs" target="_blank" className="hover:text-gray-400">api</a>
+            </div>
+          </div>
+        </footer>
       </div>
     </NodeRegistryContext.Provider>
   )
