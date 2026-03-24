@@ -81,34 +81,45 @@ def _record_usage(ip: str, tokens: int) -> None:
 
 
 def _select_tier1_model(node) -> tuple[str | None, str | None]:
-    """Select the best available Tier 1 model.
+    """Select the best available Tier 1 model (first candidate).
 
-    Checks local models first, then fleet nodes.
     Returns (model_name, fleet_addr) — fleet_addr is None for local models.
     """
-    # Check local models
-    local_candidates = []
+    candidates = _get_candidates(node)
+    if candidates:
+        return candidates[0][0], candidates[0][1]
+    return None, None
+
+
+_round_robin_counter = 0
+
+
+def _get_candidates(node) -> list[tuple[str, str | None, int]]:
+    """Get all available model candidates, load-balanced across equal tiers.
+
+    Returns list of (model_name, fleet_addr_or_None, tier).
+    Candidates within the same tier are rotated via round-robin so
+    concurrent requests spread across models/nodes instead of always
+    hitting the same one first.
+    """
+    global _round_robin_counter
+    _round_robin_counter += 1
+
+    candidates = []
+
+    # Local models (preferred — no network hop)
     for m in node.inference.loaded_models:
         tier = classify_tier(m.param_count_b)
-        if tier == 1:
-            local_candidates.append(m)
+        candidates.append((m.name, None, tier))
 
-    if local_candidates:
-        local_candidates.sort(key=lambda m: m.param_count_b, reverse=True)
-        return local_candidates[0].name, None
-
-    # Fallback: any local model (param_count_b unknown)
-    if node.inference.loaded_models:
-        return node.inference.loaded_models[0].name, None
-
-    # Check fleet nodes — prefer Tier 1, fall back to any model
+    # Fleet nodes
     import time as _time
-    best_fleet = None  # (name, addr, tier)
     for entry in node.node_registry.values():
         if entry.get("status") != "approved":
             continue
         if _time.time() - entry.get("last_seen", 0) > 120:
             continue  # offline
+        addr = entry.get("api_addr", "")
         for m in entry.get("capabilities", {}).get("models", []):
             if isinstance(m, dict):
                 name = m.get("name", "")
@@ -116,18 +127,21 @@ def _select_tier1_model(node) -> tuple[str | None, str | None]:
                 tier = classify_tier(param_b)
             else:
                 name = m
-                tier = 1  # unknown defaults to Tier 1
-            addr = entry.get("api_addr", "")
-            if tier <= 1:
-                return name, addr  # Tier 1 — use immediately
-            if best_fleet is None or tier < best_fleet[2]:
-                best_fleet = (name, addr, tier)
+                tier = 1
+            candidates.append((name, addr, tier))
 
-    # No Tier 1 found — fall back to best available (better than nothing)
-    if best_fleet:
-        return best_fleet[0], best_fleet[1]
+    # Group by tier, rotate within each tier via round-robin
+    from itertools import groupby
+    candidates.sort(key=lambda c: (c[2], 0 if c[1] is None else 1))
+    rotated = []
+    for _tier, group in groupby(candidates, key=lambda c: c[2]):
+        items = list(group)
+        if len(items) > 1:
+            offset = _round_robin_counter % len(items)
+            items = items[offset:] + items[:offset]
+        rotated.extend(items)
 
-    return None, None
+    return rotated
 
 
 @router.post("/chat/completions")
@@ -164,9 +178,9 @@ async def public_chat(request: Request):
     if not allowed:
         return JSONResponse(status_code=429, content={"error": {"message": reason}})
 
-    # Select model (Tier 1 only, user cannot choose)
-    model_name, fleet_addr = _select_tier1_model(node)
-    if not model_name:
+    # Get all available candidates, try each until one succeeds
+    candidates = _get_candidates(node)
+    if not candidates:
         return JSONResponse(status_code=503, content={
             "error": {"message": "No models currently available. Try again later."}
         })
@@ -178,59 +192,66 @@ async def public_chat(request: Request):
     start_time = time.time()
     request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
 
-    # Route to fleet node if model is remote
-    if fleet_addr:
-        if stream:
-            return await _stream_fleet(
-                node, request_id, model_name, fleet_addr, messages,
-                temperature, max_tokens, client_ip, start_time,
+    # Try candidates in order — failover to next if busy/error
+    last_error = ""
+    for model_name, fleet_addr, _tier in candidates:
+        try:
+            if fleet_addr:
+                if stream:
+                    return await _stream_fleet(
+                        node, request_id, model_name, fleet_addr, messages,
+                        temperature, max_tokens, client_ip, start_time,
+                    )
+                return await _proxy_fleet(
+                    node, request_id, model_name, fleet_addr, messages,
+                    temperature, max_tokens, client_ip, start_time,
+                )
+
+            if stream:
+                return await _stream_public(
+                    node, request_id, model_name, messages,
+                    temperature, max_tokens, client_ip, start_time,
+                )
+
+            # Non-streaming local inference
+            inf_req = InferenceRequest(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
             )
-        return await _proxy_fleet(
-            node, request_id, model_name, fleet_addr, messages,
-            temperature, max_tokens, client_ip, start_time,
-        )
 
-    if stream:
-        return await _stream_public(
-            node, request_id, model_name, messages,
-            temperature, max_tokens, client_ip, start_time,
-        )
+            result = await node.inference.generate(inf_req)
+            latency_ms = round((time.time() - start_time) * 1000)
+            total_tokens = result.prompt_tokens + result.completion_tokens
 
-    # Non-streaming local inference
-    try:
-        inf_req = InferenceRequest(
-            model=model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        backend = node.inference.get_backend(model_name)
-        if not backend:
-            return JSONResponse(status_code=503, content={
-                "error": {"message": "Model temporarily unavailable."}
-            })
+            _record_usage(client_ip, total_tokens)
+            node.activity.record(
+                EventType.INFERENCE_COMPLETE,
+                model=model_name, source="public_gateway",
+                tokens=result.completion_tokens, latency_ms=latency_ms,
+            )
 
-        result = await backend.generate(inf_req)
-        latency_ms = round((time.time() - start_time) * 1000)
-        total_tokens = result.prompt_tokens + result.completion_tokens
+            return _clean_response(request_id, model_name, result.text,
+                                   result.finish_reason, result.prompt_tokens,
+                                   result.completion_tokens, latency_ms)
 
-        _record_usage(client_ip, total_tokens)
-        node.activity.record(
-            EventType.INFERENCE_COMPLETE,
-            model=model_name, source="public_gateway",
-            tokens=result.completion_tokens, latency_ms=latency_ms,
-        )
+        except (RuntimeError, _FleetBusyError) as e:
+            # Model busy (local queue timeout or fleet 503) — try next candidate
+            last_error = str(e)
+            logger.info(f"Gateway failover: {model_name}{'@'+fleet_addr if fleet_addr else ''} busy, trying next")
+            continue
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Gateway candidate {model_name} failed: {e}")
+            continue
 
-        return _clean_response(request_id, model_name, result.text,
-                               result.finish_reason, result.prompt_tokens,
-                               result.completion_tokens, latency_ms)
-
-    except Exception as e:
-        logger.warning(f"Public gateway inference failed: {e}")
-        node.activity.record(EventType.INFERENCE_FAILED, model=model_name, source="public_gateway")
-        return JSONResponse(status_code=500, content={
-            "error": {"message": "Inference failed. The network may be busy."}
-        })
+    # All candidates exhausted
+    logger.warning(f"Public gateway: all {len(candidates)} candidates failed. Last: {last_error}")
+    node.activity.record(EventType.INFERENCE_FAILED, model=candidates[0][0], source="public_gateway")
+    return JSONResponse(status_code=503, content={
+        "error": {"message": "All models are busy right now. Please try again in a moment."}
+    })
 
 
 def _node_hash(addr: str) -> str:
@@ -264,6 +285,11 @@ def _clean_response(request_id, model_name, text, finish_reason, prompt_tokens, 
     }
 
 
+class _FleetBusyError(Exception):
+    """Raised when a fleet node returns 503 (model busy) — triggers failover."""
+    pass
+
+
 async def _proxy_fleet(node, request_id, model_name, fleet_addr, messages, temperature, max_tokens, client_ip, start_time):
     """Proxy a non-streaming request to a fleet node."""
     import httpx
@@ -282,6 +308,9 @@ async def _proxy_fleet(node, request_id, model_name, fleet_addr, messages, tempe
                         "max_tokens": max_tokens,
                         "stream": False,
                     })
+                    # 503 = model busy — propagate to failover loop
+                    if resp.status_code == 503:
+                        raise _FleetBusyError(f"Fleet {fleet_addr} model {model_name} busy")
                     resp.raise_for_status()
                     data = resp.json()
                     break
@@ -322,62 +351,72 @@ async def _proxy_fleet(node, request_id, model_name, fleet_addr, messages, tempe
 
 
 async def _stream_fleet(node, request_id, model_name, fleet_addr, messages, temperature, max_tokens, client_ip, start_time):
-    """Stream a response from a fleet node via SSE proxy."""
+    """Stream a response from a fleet node via SSE proxy.
+
+    Raises _FleetBusyError on 503 so the gateway failover loop can try next candidate.
+    """
     import httpx
     from fastapi.responses import StreamingResponse
     from mycellm.activity import EventType
+
+    base = fleet_addr if fleet_addr.startswith("http") else f"http://{fleet_addr}"
+
+    # Pre-flight: open the connection and check status before committing to StreamingResponse
+    client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=180.0))
+    resp_ctx = client.stream("POST", f"{base}/v1/chat/completions", json={
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    })
+    upstream_resp = await resp_ctx.__aenter__()
+    if upstream_resp.status_code == 503:
+        await resp_ctx.__aexit__(None, None, None)
+        await client.aclose()
+        raise _FleetBusyError(f"Fleet {fleet_addr} model {model_name} busy")
+    if upstream_resp.status_code != 200:
+        await resp_ctx.__aexit__(None, None, None)
+        await client.aclose()
+        raise Exception(f"Fleet {fleet_addr} returned {upstream_resp.status_code}")
 
     node_id = _node_hash(fleet_addr)
 
     async def generate():
         total_tokens = 0
         first_chunk = True
-        base = fleet_addr if fleet_addr.startswith("http") else f"http://{fleet_addr}"
-        upstream_resp = None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=180.0)) as client:
-                async with client.stream("POST", f"{base}/v1/chat/completions", json={
-                    "model": model_name,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "stream": True,
-                }) as resp:
-                    upstream_resp = resp
-                    resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        payload = line[6:].strip()
-                        if payload == "[DONE]":
-                            break
+            async for line in upstream_resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    break
 
-                        try:
-                            chunk = json.loads(payload)
-                            delta = chunk.get("choices", [{}])[0].get("delta", {})
-                            content = delta.get("content", "")
-                            finish = chunk.get("choices", [{}])[0].get("finish_reason")
-                            if content:
-                                total_tokens += len(content.split())
+                try:
+                    chunk = json.loads(payload)
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    content = delta.get("content", "")
+                    finish = chunk.get("choices", [{}])[0].get("finish_reason")
+                    if content:
+                        total_tokens += len(content.split())
 
-                            out = {
-                                "id": request_id,
-                                "object": "chat.completion.chunk",
-                                "created": int(time.time()),
-                                "model": model_name,
-                                "choices": [{"index": 0, "delta": {"content": content} if content else {}, "finish_reason": finish}],
-                            }
-                            # First chunk: include node attribution
-                            if first_chunk:
-                                out["mycellm"] = {"node": node_id, "served_by": "mycellm-public"}
-                                first_chunk = False
-                            yield f"data: {json.dumps(out)}\n\n"
-                            if finish:
-                                break
-                        except json.JSONDecodeError:
-                            continue
+                    out = {
+                        "id": request_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": model_name,
+                        "choices": [{"index": 0, "delta": {"content": content} if content else {}, "finish_reason": finish}],
+                    }
+                    if first_chunk:
+                        out["mycellm"] = {"node": node_id, "served_by": "mycellm-public"}
+                        first_chunk = False
+                    yield f"data: {json.dumps(out)}\n\n"
+                    if finish:
+                        break
+                except json.JSONDecodeError:
+                    continue
 
-            # Final metadata chunk with latency
             latency_ms = round((time.time() - start_time) * 1000)
             meta_chunk = {
                 "id": request_id, "object": "chat.completion.chunk",
@@ -408,12 +447,11 @@ async def _stream_fleet(node, request_id, model_name, fleet_addr, messages, temp
             yield f"data: {json.dumps(error_chunk)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
-            # Close upstream connection if client disconnected mid-stream
-            if upstream_resp and not upstream_resp.is_stream_consumed:
-                try:
-                    await upstream_resp.aclose()
-                except Exception:
-                    pass
+            try:
+                await resp_ctx.__aexit__(None, None, None)
+                await client.aclose()
+            except Exception:
+                pass
 
     return StreamingResponse(
         generate(),
@@ -440,18 +478,8 @@ async def _stream_public(node, request_id, model_name, messages, temperature, ma
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
-            backend = node.inference.get_backend(model_name)
-            if not backend:
-                error_chunk = {
-                    "id": request_id, "object": "chat.completion.chunk",
-                    "model": model_name,
-                    "choices": [{"index": 0, "delta": {"content": "Model temporarily unavailable."}, "finish_reason": "stop"}],
-                }
-                yield f"data: {json.dumps(error_chunk)}\n\n"
-                yield "data: [DONE]\n\n"
-                return
 
-            async for chunk in backend.generate_stream(inf_req):
+            async for chunk in node.inference.generate_stream(inf_req):
                 total_tokens += len(chunk.text.split()) if chunk.text else 0
                 data = {
                     "id": request_id,

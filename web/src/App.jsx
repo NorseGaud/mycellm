@@ -392,7 +392,16 @@ async function api(path, opts = {}) {
   const headers = { ...authHeaders(), ...(opts.headers || {}) }
   const resp = await fetch(path, { ...opts, headers })
   if (resp.status === 401) throw new Error('unauthorized')
-  if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`)
+  if (!resp.ok) {
+    let msg = `${resp.status} ${resp.statusText}`
+    try {
+      const body = await resp.json()
+      if (body.error?.message) msg = body.error.message
+    } catch {}
+    const err = new Error(msg)
+    err.status = resp.status
+    throw err
+  }
   return resp.json()
 }
 
@@ -1769,8 +1778,22 @@ function ModelTable({ allModels, stateIndicator, stateNameColor, stateBadge, doA
               <td className="py-2.5 px-4" title={m.state}>{stateIndicator[m.state]}</td>
               <td className={`py-2.5 px-4 font-mono ${stateNameColor[m.state]}`}>
                 {m.name}
-                {m.state === 'loading' && m.phase && (
-                  <div className="text-xs text-ledger/70 font-sans mt-0.5">{m.phase}{m.elapsed ? ` · ${m.elapsed}s` : ''}</div>
+                {m.state === 'loading' && (
+                  <div className="mt-1 space-y-1">
+                    {m.progress > 0 && m.progress < 1 ? (
+                      <>
+                        <div className="flex items-center space-x-2">
+                          <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden" style={{maxWidth: '160px'}}>
+                            <div className="h-full bg-ledger rounded-full transition-all duration-500" style={{width: `${Math.round(m.progress * 100)}%`}} />
+                          </div>
+                          <span className="text-xs text-ledger/70 font-mono">{Math.round(m.progress * 100)}%</span>
+                          {m.eta_seconds != null && <span className="text-xs text-gray-600">{m.eta_seconds > 60 ? `${Math.round(m.eta_seconds / 60)}m` : `${Math.round(m.eta_seconds)}s`} left</span>}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-xs text-ledger/70 font-sans">{m.phase || 'loading...'}{m.elapsed ? ` · ${m.elapsed}s` : ''}</div>
+                    )}
+                  </div>
                 )}
                 {m.state === 'failed' && m.error && (
                   <div className="text-xs text-compute/70 font-sans mt-0.5 truncate max-w-[250px]" title={m.error}>{m.error}</div>
@@ -2295,7 +2318,8 @@ function ModelsTab({ status, onRefresh }) {
             merged.set(s.model, {
               name: s.model, state: s.status, backend: s.backend || 'llama.cpp',
               phase: s.phase, error: s.error, elapsed: s.elapsed,
-              quant: '', size: '', ctx: 0,
+              progress: s.progress || 0, eta_seconds: s.eta_seconds, size_gb: s.size_gb || 0,
+              quant: '', size: s.size_gb ? `${s.size_gb}GB` : '', ctx: 0,
             })
           }
         }
@@ -2398,9 +2422,10 @@ function ModelsTab({ status, onRefresh }) {
       <div className="border border-white/10 bg-[#111] rounded-xl overflow-hidden">
         <div className="flex border-b border-white/10">
           {[
-            { id: 'browse', label: 'Browse HuggingFace', icon: '\u{1F917}' },
+            { id: 'browse', label: 'HuggingFace', icon: '\u{1F917}' },
             { id: 'local', label: 'Local File', icon: '\u{1F4C1}' },
-            { id: 'api', label: 'Remote API', icon: '\u{1F517}' },
+            { id: 'api', label: 'API Provider', icon: '\u{1F517}' },
+            { id: 'relay', label: 'Device Relay', icon: '\u{1F4F1}' },
           ].map(tab => (
             <button key={tab.id} onClick={() => setAddMode(tab.id)}
               className={`flex items-center space-x-2 px-4 py-3 text-xs font-medium border-b-2 transition-all ${
@@ -2588,7 +2613,7 @@ function ModelsTab({ status, onRefresh }) {
 
           {addMode === 'local' && (
             <div className="space-y-3">
-              <p className="text-xs text-gray-500">Load a GGUF model file from the local filesystem.</p>
+              <p className="text-xs text-gray-500">Load a GGUF model already on this machine's disk.</p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <div className="md:col-span-2">
                   <label className="text-xs text-gray-500 block mb-1">Model path (.gguf)</label>
@@ -2612,7 +2637,7 @@ function ModelsTab({ status, onRefresh }) {
 
           {addMode === 'api' && (
             <div className="space-y-3">
-              <p className="text-xs text-gray-500">Connect to an OpenAI-compatible API endpoint (OpenRouter, Ollama, vLLM, etc.)</p>
+              <p className="text-xs text-gray-500">Connect to a cloud or self-hosted API. You choose the model and provide credentials. <span className="text-gray-600">OpenRouter, Together, Groq, vLLM...</span></p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">Model name</label>
@@ -2655,6 +2680,10 @@ function ModelsTab({ status, onRefresh }) {
             </div>
           )}
 
+          {addMode === 'relay' && (
+            <RelayPanel nodeApi={nodeApi} onRefresh={onRefresh} />
+          )}
+
           {result && (
             <div className={`flex items-center space-x-2 text-sm p-2.5 rounded-lg mt-3 ${
               result.error ? 'bg-compute/10 text-compute' : 'bg-spore/10 text-spore'
@@ -2668,6 +2697,169 @@ function ModelsTab({ status, onRefresh }) {
     </div>
   )
 }
+
+
+function RelayPanel({ nodeApi, onRefresh }) {
+  const [relays, setRelays] = useState([])
+  const [newUrl, setNewUrl] = useState('')
+  const [newName, setNewName] = useState('')
+  const [adding, setAdding] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
+  const [result, setResult] = useState(null)
+
+  const fetchRelays = () => {
+    api('/v1/node/relay').then(d => setRelays(d.relays || [])).catch(() => {})
+  }
+
+  useEffect(() => {
+    fetchRelays()
+    const iv = setInterval(fetchRelays, 5000)
+    return () => clearInterval(iv)
+  }, [])
+
+  const addRelay = async () => {
+    if (!newUrl.trim()) return
+    setAdding(true)
+    setResult(null)
+    try {
+      const resp = await api('/v1/node/relay/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: newUrl.trim(), name: newName.trim() }),
+      })
+      if (resp.error) {
+        setResult({ error: resp.error })
+      } else {
+        const relay = resp.relay || {}
+        if (relay.online) {
+          setResult({ success: `Connected to ${relay.name} — ${relay.models?.length || 0} model(s) discovered` })
+        } else {
+          setResult({ error: `Added but offline: ${relay.error || 'cannot connect'}` })
+        }
+        setNewUrl('')
+        setNewName('')
+        fetchRelays()
+        onRefresh()
+      }
+    } catch (e) {
+      setResult({ error: e.message })
+    }
+    setAdding(false)
+    setTimeout(() => setResult(null), 5000)
+  }
+
+  const removeRelay = async (url) => {
+    try {
+      await api('/v1/node/relay/remove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      })
+      fetchRelays()
+      onRefresh()
+    } catch {}
+  }
+
+  const refreshAll = async () => {
+    setRefreshing(true)
+    try {
+      const resp = await api('/v1/node/relay/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      setResult({ success: `Discovered ${resp.models_discovered || 0} new model(s)` })
+      fetchRelays()
+      onRefresh()
+    } catch (e) {
+      setResult({ error: e.message })
+    }
+    setRefreshing(false)
+    setTimeout(() => setResult(null), 4000)
+  }
+
+  return (
+    <div className="space-y-4">
+      <p className="text-xs text-gray-500">
+        Connect to a device on your network. Models are auto-discovered — no credentials needed.
+        <span className="text-gray-600"> Ollama, LM Studio, iPad, llama.cpp server...</span>
+      </p>
+
+      {/* Existing relays */}
+      {relays.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500 font-mono uppercase tracking-wider">{relays.length} relay{relays.length !== 1 ? 's' : ''} connected</span>
+            <button onClick={refreshAll} disabled={refreshing}
+              className="flex items-center space-x-1 text-xs text-gray-500 hover:text-white transition-colors disabled:opacity-40">
+              <RefreshCw size={11} className={refreshing ? 'animate-spin' : ''} />
+              <span>Refresh all</span>
+            </button>
+          </div>
+          {relays.map(r => (
+            <div key={r.url} className="bg-black/40 border border-white/5 rounded-lg px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${r.online ? 'bg-spore' : 'bg-compute animate-pulse'}`} />
+                  <span className="font-mono text-sm text-white font-medium">{r.name}</span>
+                  <span className="text-xs text-gray-600 font-mono">{r.url}</span>
+                </div>
+                <div className="flex items-center space-x-3">
+                  <span className={`text-xs ${r.online ? 'text-gray-500' : 'text-compute'}`}>
+                    {r.online ? `${r.model_count} model${r.model_count !== 1 ? 's' : ''}` : r.error || 'offline'}
+                  </span>
+                  <button onClick={() => removeRelay(r.url)} className="text-gray-600 hover:text-compute transition-colors">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+              {r.online && r.models?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2.5">
+                  {r.models.map(m => (
+                    <span key={m} className="text-xs font-mono bg-spore/5 text-spore border border-spore/10 rounded px-2 py-0.5">
+                      relay:{m}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Add relay form */}
+      <div className="flex items-end gap-2">
+        <div className="flex-[2]">
+          <label className="text-xs text-gray-500 block mb-1">Device URL</label>
+          <input value={newUrl} onChange={e => setNewUrl(e.target.value)}
+            placeholder="http://ipad.lan:8080"
+            onKeyDown={e => e.key === 'Enter' && addRelay()}
+            className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+        </div>
+        <div className="flex-1">
+          <label className="text-xs text-gray-500 block mb-1">Label <span className="text-gray-700">(optional)</span></label>
+          <input value={newName} onChange={e => setNewName(e.target.value)}
+            placeholder="iPad Pro"
+            onKeyDown={e => e.key === 'Enter' && addRelay()}
+            className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+        </div>
+        <button onClick={addRelay} disabled={adding || !newUrl.trim()}
+          className="bg-white/10 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-white/20 disabled:opacity-40 whitespace-nowrap flex items-center space-x-1.5">
+          {adding ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+          <span>{adding ? 'Connecting...' : 'Add Relay'}</span>
+        </button>
+      </div>
+
+      {result && (
+        <div className={`flex items-center space-x-2 text-sm p-2.5 rounded-lg ${result.error ? 'bg-compute/10 text-compute' : 'bg-spore/10 text-spore'}`}>
+          {result.error ? <AlertCircle size={14} /> : <Check size={14} />}
+          <span>{result.error || result.success}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
 
 // ── Chat Tab ──
 
@@ -2796,36 +2988,71 @@ function ChatTab() {
     const controller = new AbortController()
     abortRef.current = controller
 
-    try {
-      const resp = await api('/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: model === 'auto' ? '' : model,
-          messages: history.map(m => ({ role: m.role, content: m.content })),
-          max_tokens: 2048,
-          ...(model === 'auto' && (routingOpts.min_tier || routingOpts.required_tags.length > 0) ? {
-            mycellm: {
-              min_tier: routingOpts.min_tier || undefined,
-              required_tags: routingOpts.required_tags.length > 0 ? routingOpts.required_tags : undefined,
-              routing: routingOpts.routing,
-              fallback: routingOpts.fallback,
-            }
-          } : {}),
-        }),
-        signal: controller.signal,
-      })
-      const respText = resp.choices?.[0]?.message?.content || '[no response]'
-      const usage = resp.usage || {}
-      const routedTo = resp.model || 'unknown'
-      setMessages(prev => [...prev, {
-        role: 'assistant', content: respText, model: routedTo,
-        tokens: `${usage.prompt_tokens || 0}+${usage.completion_tokens || 0}`,
-      }])
-    } catch (e) {
-      if (e.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'assistant', content: `*Error: ${e.message}*` }])
-        setInput(text)
+    const MAX_RETRIES = 5
+    const RETRY_DELAYS = [2, 4, 8, 15, 30]
+    const reqBody = JSON.stringify({
+      model: model === 'auto' ? '' : model,
+      messages: history.map(m => ({ role: m.role, content: m.content })),
+      max_tokens: 2048,
+      ...(model === 'auto' && (routingOpts.min_tier || routingOpts.required_tags.length > 0) ? {
+        mycellm: {
+          min_tier: routingOpts.min_tier || undefined,
+          required_tags: routingOpts.required_tags.length > 0 ? routingOpts.required_tags : undefined,
+          routing: routingOpts.routing,
+          fallback: routingOpts.fallback,
+        }
+      } : {}),
+    })
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const resp = await api('/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: reqBody,
+          signal: controller.signal,
+        })
+        const respText = resp.choices?.[0]?.message?.content || '[no response]'
+        const usage = resp.usage || {}
+        const routedTo = resp.model || 'unknown'
+        setMessages(prev => [...prev, {
+          role: 'assistant', content: respText, model: routedTo,
+          tokens: `${usage.prompt_tokens || 0}+${usage.completion_tokens || 0}`,
+        }])
+        break // success
+      } catch (e) {
+        if (e.name === 'AbortError') break
+
+        // Auto-retry on 429/503
+        const retryable = e.status === 429 || e.status === 503
+        if (retryable && attempt < MAX_RETRIES) {
+          const delay = RETRY_DELAYS[Math.min(attempt, RETRY_DELAYS.length - 1)]
+          setMessages(prev => [...prev.filter(m => !m._retryIndicator), {
+            role: 'assistant', _retryIndicator: true,
+            content: `⏳ Models busy — retrying in ${delay}s (attempt ${attempt + 1}/${MAX_RETRIES})...`,
+            isCommand: true,
+          }])
+          await new Promise(r => setTimeout(r, delay * 1000))
+          // Remove retry indicator before next attempt
+          setMessages(prev => prev.filter(m => !m._retryIndicator))
+          continue
+        }
+
+        // Final failure
+        let errContent
+        if (e.status === 429) {
+          errContent = '⚠️ **Rate limit reached.** Retries exhausted — please try again later.'
+        } else if (e.status === 503) {
+          errContent = '⚠️ **All models are busy.** Retries exhausted — please try again shortly.'
+        } else if (e.message?.includes('fetch') || e.message?.includes('Failed')) {
+          errContent = '⚠️ **Cannot reach the node.** Check that `mycellm serve` is running.'
+        } else {
+          errContent = `⚠️ **Error:** ${e.message}`
+        }
+        setMessages(prev => [...prev, {
+          role: 'assistant', content: errContent, isError: true, retryText: text,
+        }])
+        break
       }
     }
     abortRef.current = null
@@ -2942,6 +3169,18 @@ function ChatTab() {
                 ? <div className="whitespace-pre-wrap">{m.content}</div>
                 : <div className="chat-md" dangerouslySetInnerHTML={{ __html: marked.parse(m.content || '') }} />
               }
+              {m.isError && m.retryText && (
+                <div className="mt-2">
+                  <button onClick={() => {
+                    setMessages(prev => prev.filter((_, j) => j !== i && (j !== i - 1 || prev[j]?.role !== 'user')))
+                    setInput(m.retryText)
+                    setTimeout(() => document.querySelector('[placeholder*="message"]')?.focus(), 50)
+                  }}
+                    className="text-xs bg-white/5 border border-white/10 text-gray-400 px-3 py-1 rounded-lg hover:bg-white/10 hover:text-white transition-colors">
+                    <span className="flex items-center space-x-1"><RefreshCw size={10} /><span>Retry</span></span>
+                  </button>
+                </div>
+              )}
               {m.isSensitiveWarning && m._resolve && (
                 <div className="mt-3 flex space-x-2">
                   <button onClick={() => m._resolve(false)}

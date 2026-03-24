@@ -12,10 +12,13 @@ List all available models across the network (local + QUIC peers + fleet).
   "object": "list",
   "data": [
     {"id": "Qwen2.5-3B-Instruct-Q8_0", "object": "model", "owned_by": "local"},
-    {"id": "Mistral-Small-24B-Q4_K_M", "object": "model", "owned_by": "fleet:aurora"}
+    {"id": "Mistral-Small-24B-Q4_K_M", "object": "model", "owned_by": "fleet:aurora"},
+    {"id": "relay:llama3.2:3b", "object": "model", "owned_by": "relay:ipad"}
   ]
 }
 ```
+
+Models prefixed with `relay:` are served by external devices connected via [relay backends](/integrations/relay/).
 
 ## `POST /v1/node/models/load`
 
@@ -29,7 +32,7 @@ List all available models across the network (local + QUIC peers + fleet).
 }
 ```
 
-### Remote API model
+### API Provider model
 
 ```json
 {
@@ -37,11 +40,14 @@ List all available models across the network (local + QUIC peers + fleet).
   "backend": "openai",
   "api_base": "https://openrouter.ai/api/v1",
   "api_key": "secret:openrouter",
-  "api_model": "anthropic/claude-sonnet-4"
+  "api_model": "anthropic/claude-sonnet-4",
+  "max_concurrent": 32
 }
 ```
 
 Use `secret:name` to reference encrypted secrets instead of raw API keys.
+
+`max_concurrent` controls how many simultaneous requests this model can handle (default: 32 for API/relay, 1 for local GGUF). See [relay docs](/integrations/relay/#concurrency) for details.
 
 ## `POST /v1/node/models/unload`
 

@@ -18,15 +18,44 @@ from mycellm.protocol.capabilities import ModelCapability
 logger = logging.getLogger("mycellm.inference")
 
 
-class InferenceManager:
-    """Manages loaded models, concurrency limits, and backend routing."""
+def _get_rss_bytes() -> int:
+    """Get current process RSS in bytes. Cross-platform."""
+    try:
+        import os
+        import platform
+        if platform.system() == "Linux":
+            with open(f"/proc/{os.getpid()}/statm") as f:
+                return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+        elif platform.system() == "Darwin":
+            import resource
+            # ru_maxrss is in bytes on macOS
+            return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        pass
+    return 0
 
-    def __init__(self, max_concurrent: int = 2):
+
+class InferenceManager:
+    """Manages loaded models, concurrency limits, and backend routing.
+
+    Concurrency model:
+      - Global semaphore limits total active inferences across all models
+      - Per-model locks serialize access to llama.cpp backends (NOT thread-safe)
+      - OpenAI-compat backends get their own per-model semaphore (concurrent OK)
+      - When a model is busy, requests queue with a configurable timeout
+    """
+
+    def __init__(self, max_concurrent: int = 2, queue_timeout: float = 120.0):
         self._backends: dict[str, InferenceBackend] = {}
         self._model_info: dict[str, ModelCapability] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._max_concurrent = max_concurrent
         self._active_count = 0
+        self._queue_timeout = queue_timeout
+        # Per-model locks: llama.cpp → Lock (serialize), openai → Semaphore(4)
+        self._model_locks: dict[str, asyncio.Lock | asyncio.Semaphore] = {}
+        # Queue depth tracking per model
+        self._queue_depth: dict[str, int] = {}
         # Persistent configs — survives unload so models can be re-loaded
         self._saved_configs: dict[str, dict] = {}  # name -> config dict
         # Load status tracking
@@ -67,6 +96,9 @@ class InferenceManager:
             "phase": "initializing",
             "backend": backend_type,
             "started_at": _time.time(),
+            "progress": 0.0,  # 0.0 - 1.0
+            "eta_seconds": None,
+            "size_gb": 0.0,
             "error": None,
         }
 
@@ -112,15 +144,80 @@ class InferenceManager:
                     size_gb = Path(model_path).stat().st_size / (1024**3) if Path(model_path).exists() else 0
                     if size_gb > 0:
                         self._load_status[model_name]["phase"] = f"loading {size_gb:.1f}GB into memory"
+                        self._load_status[model_name]["size_gb"] = round(size_gb, 2)
+
+                # Progress tracking — uses llama.cpp callback if available,
+                # falls back to RSS-based estimation for older versions
+                load_start = _time.time()
+                file_bytes = Path(model_path).stat().st_size if Path(model_path).exists() else 0
+                _has_native_progress = False
+
+                def _progress_cb(progress: float):
+                    nonlocal _has_native_progress
+                    _has_native_progress = True
+                    self._load_status[model_name]["progress"] = round(progress, 3)
+                    elapsed = _time.time() - load_start
+                    if progress > 0.01:
+                        eta = (elapsed / progress) * (1.0 - progress)
+                        self._load_status[model_name]["eta_seconds"] = round(eta, 1)
+                    pct = int(progress * 100)
+                    sz = self._load_status[model_name].get("size_gb", 0)
+                    self._load_status[model_name]["phase"] = f"loading {sz:.1f}GB — {pct}%"
+
+                kwargs["progress_callback"] = _progress_cb
+
+                # RSS-based progress monitor (fallback when native callback not available)
+                self._load_status[model_name]["_monitor"] = True
+                async def _rss_progress_monitor():
+                    try:
+                        rss_start = _get_rss_bytes()
+                        if rss_start <= 0 or file_bytes <= 0:
+                            return
+                        while self._load_status.get(model_name, {}).get("_monitor") and not _has_native_progress:
+                            await asyncio.sleep(1.0)
+                            if _has_native_progress:
+                                break
+                            rss_now = _get_rss_bytes()
+                            rss_delta = max(0, rss_now - rss_start)
+                            progress = min(0.99, rss_delta / file_bytes)
+                            self._load_status[model_name]["progress"] = round(progress, 3)
+                            elapsed = _time.time() - load_start
+                            if progress > 0.02:
+                                eta = (elapsed / progress) * (1.0 - progress)
+                                self._load_status[model_name]["eta_seconds"] = round(eta, 1)
+                            pct = int(progress * 100)
+                            sz = self._load_status[model_name].get("size_gb", 0)
+                            self._load_status[model_name]["phase"] = f"loading {sz:.1f}GB — {pct}%"
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+                rss_task = asyncio.ensure_future(_rss_progress_monitor())
             else:
                 self._load_status[model_name]["phase"] = "connecting to API"
 
             await backend.load_model(model_path, name=model_name, **kwargs)
 
+            # Stop RSS monitor if it was running
+            if backend_type == "llama.cpp":
+                self._load_status[model_name]["_monitor"] = False
+                rss_task.cancel()
+
+            self._load_status[model_name]["progress"] = 1.0
+            self._load_status[model_name]["eta_seconds"] = 0
             self._load_status[model_name]["phase"] = "registering"
             if model_path:
                 self._model_paths[model_name] = model_path
             self._backends[model_name] = backend
+            # Per-model concurrency control:
+            # - llama.cpp: Lock (1 concurrent) — C context is NOT thread-safe
+            # - Remote/relay: configurable via max_concurrent kwarg, default 32
+            #   The remote server handles its own backpressure via HTTP 429/503
+            if backend_type == "llama.cpp":
+                self._model_locks[model_name] = asyncio.Lock()
+            else:
+                max_c = kwargs.get("max_concurrent", 32)
+                self._model_locks[model_name] = asyncio.Semaphore(max_c)
+            self._queue_depth[model_name] = 0
             self._model_info[model_name] = ModelCapability(
                 name=model_name,
                 quant=kwargs.get("quant", ""),
@@ -142,6 +239,13 @@ class InferenceManager:
             return model_name
 
         except Exception as e:
+            # Clean up RSS monitor on failure
+            if model_name in self._load_status:
+                self._load_status[model_name]["_monitor"] = False
+            try:
+                rss_task.cancel()
+            except (NameError, Exception):
+                pass
             self._load_status[model_name].update({"status": "failed", "phase": "error", "error": str(e)})
             logger.error(f"Failed to load {model_name}: {e}")
             raise
@@ -151,6 +255,8 @@ class InferenceManager:
         if backend:
             await backend.unload_model(model_name)
             self._model_info.pop(model_name, None)
+            self._model_locks.pop(model_name, None)
+            self._queue_depth.pop(model_name, None)
             logger.info(f"Model {model_name} unloaded")
 
             # Mark as disabled in saved configs (don't delete — allows re-enable)
@@ -184,8 +290,40 @@ class InferenceManager:
             return next(iter(self._backends))
         return ""
 
+    @property
+    def queue_status(self) -> dict[str, int]:
+        """Get current queue depth per model."""
+        return dict(self._queue_depth)
+
+    async def _acquire_model(self, model_name: str) -> None:
+        """Acquire the per-model lock with timeout. Raises if queue full or timeout."""
+        lock = self._model_locks.get(model_name)
+        if not lock:
+            return  # no lock (shouldn't happen)
+
+        self._queue_depth[model_name] = self._queue_depth.get(model_name, 0) + 1
+        try:
+            if isinstance(lock, asyncio.Lock):
+                # llama.cpp: serialize. If locked, we're queued.
+                if lock.locked():
+                    logger.info(f"Model {model_name} busy — request queued (depth={self._queue_depth[model_name]})")
+                await asyncio.wait_for(lock.acquire(), timeout=self._queue_timeout)
+            else:
+                # Semaphore for remote backends
+                await asyncio.wait_for(lock.acquire(), timeout=self._queue_timeout)
+        except asyncio.TimeoutError:
+            self._queue_depth[model_name] = max(0, self._queue_depth.get(model_name, 1) - 1)
+            raise RuntimeError(f"Model {model_name} is busy. Request timed out after {self._queue_timeout}s in queue.")
+
+    def _release_model(self, model_name: str) -> None:
+        """Release the per-model lock."""
+        lock = self._model_locks.get(model_name)
+        if lock:
+            lock.release()
+        self._queue_depth[model_name] = max(0, self._queue_depth.get(model_name, 1) - 1)
+
     async def generate(self, request: InferenceRequest) -> InferenceResult:
-        """Run inference with concurrency control."""
+        """Run inference with per-model locking and global concurrency control."""
         model_name = self.resolve_model_name(request.model)
         if not model_name:
             raise RuntimeError("No models loaded")
@@ -193,17 +331,18 @@ class InferenceManager:
         request.model = model_name
         backend = self._backends[model_name]
 
-        async with self._semaphore:
-            self._active_count += 1
-            try:
-                return await backend.generate(request)
-            finally:
-                self._active_count -= 1
+        await self._acquire_model(model_name)
+        self._active_count += 1
+        try:
+            return await backend.generate(request)
+        finally:
+            self._active_count -= 1
+            self._release_model(model_name)
 
     async def generate_stream(
         self, request: InferenceRequest
     ) -> AsyncIterator[InferenceChunk]:
-        """Run streaming inference with concurrency control."""
+        """Run streaming inference with per-model locking and global concurrency control."""
         model_name = self.resolve_model_name(request.model)
         if not model_name:
             raise RuntimeError("No models loaded")
@@ -211,13 +350,14 @@ class InferenceManager:
         request.model = model_name
         backend = self._backends[model_name]
 
-        async with self._semaphore:
-            self._active_count += 1
-            try:
-                async for chunk in backend.generate_stream(request):
-                    yield chunk
-            finally:
-                self._active_count -= 1
+        await self._acquire_model(model_name)
+        self._active_count += 1
+        try:
+            async for chunk in backend.generate_stream(request):
+                yield chunk
+        finally:
+            self._active_count -= 1
+            self._release_model(model_name)
 
     async def save_model_configs(self, data_dir: Path) -> None:
         """Save model configs to disk. Preserves unloaded API model configs."""
