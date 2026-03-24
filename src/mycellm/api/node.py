@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
@@ -33,13 +34,56 @@ async def system_info(request: Request):
 async def debug_config(request: Request):
     """Debug: show relevant runtime config."""
     node = request.app.state.node
+    db_backend = "PostgreSQL" if node._settings.db_url and "postgresql" in node._settings.db_url else "SQLite"
     return {
         "node_name": node._settings.node_name,
         "bootstrap_peers": node._settings.bootstrap_peers,
         "bootstrap_parsed": [f"{h}:{p}" for h, p in node._settings.get_bootstrap_list()],
         "api_key_set": bool(node._settings.api_key),
+        "hf_token_set": bool(node._settings.hf_token),
+        "db_backend": db_backend,
+        "log_level": node._settings.log_level,
+        "telemetry": node._settings.telemetry,
         "announce_task_alive": node._announce_task is not None and not node._announce_task.done() if hasattr(node, '_announce_task') else False,
     }
+
+
+@router.get("/settings/secrets")
+async def list_secrets(request: Request):
+    """List stored secret names (not values)."""
+    node = request.app.state.node
+    if not hasattr(node, "secret_store") or not node.secret_store:
+        return {"secrets": []}
+    return {"secrets": node.secret_store.list_names()}
+
+
+@router.post("/settings/secrets")
+async def set_secret(request: Request):
+    """Store an encrypted secret."""
+    node = request.app.state.node
+    if not hasattr(node, "secret_store") or not node.secret_store:
+        return {"error": "Secret store not initialized"}
+    body = await request.json()
+    name = body.get("name", "")
+    value = body.get("value", "")
+    if not name or not value:
+        return {"error": "name and value required"}
+    node.secret_store.set(name, value)
+    return {"status": "ok", "name": name}
+
+
+@router.delete("/settings/secrets")
+async def remove_secret(request: Request):
+    """Remove a stored secret."""
+    node = request.app.state.node
+    if not hasattr(node, "secret_store") or not node.secret_store:
+        return {"error": "Secret store not initialized"}
+    body = await request.json()
+    name = body.get("name", "")
+    if not name:
+        return {"error": "name required"}
+    removed = node.secret_store.remove(name)
+    return {"status": "removed" if removed else "not_found", "name": name}
 
 
 @router.get("/peers")
@@ -83,6 +127,11 @@ async def load_model(request: Request):
     model_path = body.get("model_path", "")
     name = body.get("name")
 
+    # Resolve secret references in api_key (e.g. "secret:openrouter" → actual key)
+    api_key = body.get("api_key", "")
+    if api_key and hasattr(node, "secret_store") and node.secret_store:
+        api_key = node.secret_store.resolve(api_key)
+
     # Local backends require model_path; remote backends don't
     if backend_type == "llama.cpp" and not model_path:
         return {"error": "model_path required for llama.cpp backend"}
@@ -120,7 +169,7 @@ async def load_model(request: Request):
     try:
         loaded_name = await node.inference.load_model(
             model_path, name=name, backend_type=backend_type,
-            api_base=body.get("api_base", ""), api_key=body.get("api_key", ""),
+            api_base=body.get("api_base", ""), api_key=api_key,
             api_model=body.get("api_model", ""), ctx_len=body.get("ctx_len", 4096),
             timeout=body.get("timeout", 120),
         )
@@ -181,6 +230,56 @@ async def list_saved_configs(request: Request):
             "api_key": "***" if c.get("api_key") else "",  # mask key
         })
     return {"configs": configs}
+
+
+@router.post("/models/update")
+async def update_model(request: Request):
+    """Update a model's config (unload + reload with new settings).
+
+    Merges provided fields with saved config. Omitted fields keep current values.
+    """
+    node = request.app.state.node
+    body = await request.json()
+    model_name = body.get("model", "")
+    if not model_name:
+        return {"error": "model name required"}
+
+    # Get existing config (from saved or running)
+    config = dict(node.inference._saved_configs.get(model_name, {}))
+    if not config:
+        return {"error": f"No config for '{model_name}'"}
+
+    # Merge overrides — only update fields that were provided
+    if body.get("api_base"): config["api_base"] = body["api_base"]
+    if body.get("api_model"): config["api_model"] = body["api_model"]
+    if body.get("api_key"):
+        new_key = body["api_key"]
+        if hasattr(node, "secret_store") and node.secret_store:
+            new_key = node.secret_store.resolve(new_key)
+        config["api_key"] = new_key
+    if body.get("ctx_len"): config["ctx_len"] = body["ctx_len"]
+
+    # Unload if currently loaded
+    if model_name in {m.name for m in node.inference.loaded_models}:
+        await node.inference.unload_model(model_name)
+
+    backend_type = config.get("backend", "openai")
+    try:
+        await node.inference.load_model(
+            config.get("model_path", ""),
+            name=model_name,
+            backend_type=backend_type,
+            api_base=config.get("api_base", ""),
+            api_key=config.get("api_key", ""),
+            api_model=config.get("api_model", ""),
+            ctx_len=config.get("ctx_len", 4096),
+        )
+        node.capabilities.models = node.inference.loaded_models
+        await node.announce_capabilities()
+        node.activity.record(EventType.MODEL_LOADED, model=model_name, backend=backend_type)
+        return {"status": "updated", "model": model_name}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @router.post("/models/reload")
@@ -459,6 +558,226 @@ async def public_dashboard(request: Request):
             "requests_per_min": stats.get("requests_per_min", 0),
         },
         "uptime_seconds": node.uptime,
+    }
+
+
+@router.get("/fleet/hardware")
+async def fleet_hardware(request: Request):
+    """Aggregate hardware stats across fleet nodes."""
+    node = request.app.state.node
+
+    nodes = []
+
+    # Self
+    sys_info = node.get_system_info()
+    tps = node.activity.tps if hasattr(node, 'activity') else 0
+    nodes.append({
+        "name": node._settings.node_name,
+        "peer_id": node.peer_id,
+        "type": "self",
+        "gpu": node.capabilities.hardware.gpu,
+        "vram_gb": node.capabilities.hardware.vram_gb,
+        "backend": node.capabilities.hardware.backend,
+        "ram_gb": sys_info.get("memory", {}).get("total_gb", 0),
+        "ram_used_pct": sys_info.get("memory", {}).get("used_pct", 0),
+        "models": [m.name for m in node.inference.loaded_models],
+        "tps": tps,
+        "online": True,
+        "uptime_seconds": node.uptime,
+    })
+
+    # Fleet nodes
+    for entry in node.node_registry.values():
+        if entry.get("status") != "approved":
+            continue
+        sys = entry.get("system", {})
+        hw = sys.get("gpu", entry.get("capabilities", {}).get("hardware", {}))
+        mem = sys.get("memory", {})
+        caps = entry.get("capabilities", {})
+        models = caps.get("models", [])
+
+        nodes.append({
+            "name": entry.get("node_name", ""),
+            "peer_id": entry.get("peer_id", ""),
+            "type": "fleet",
+            "gpu": hw.get("gpu", "CPU"),
+            "vram_gb": hw.get("vram_gb", 0),
+            "backend": hw.get("backend", "cpu"),
+            "ram_gb": mem.get("total_gb", 0),
+            "ram_used_pct": mem.get("used_pct", 0),
+            "models": [m.get("name", m) if isinstance(m, dict) else m for m in models],
+            "tps": entry.get("telemetry", {}).get("tps", 0),
+            "online": entry.get("online", False),
+            "uptime_seconds": 0,
+        })
+
+    # Aggregate
+    total_tps = sum(n["tps"] for n in nodes)
+    total_vram = sum(n["vram_gb"] for n in nodes)
+    total_ram = sum(n["ram_gb"] for n in nodes)
+    total_models = len(set(m for n in nodes for m in n["models"]))
+    online_count = sum(1 for n in nodes if n["online"])
+
+    return {
+        "nodes": nodes,
+        "aggregate": {
+            "total_nodes": len(nodes),
+            "online_nodes": online_count,
+            "total_tps": round(total_tps, 1),
+            "total_vram_gb": round(total_vram, 1),
+            "total_ram_gb": round(total_ram, 1),
+            "total_models": total_models,
+        },
+    }
+
+
+@router.get("/settings/telemetry")
+async def get_telemetry(request: Request):
+    """Get telemetry opt-in status."""
+    node = request.app.state.node
+    return {
+        "enabled": node._settings.telemetry,
+        "description": "Anonymous usage stats (request/token counts, TPS, model names, uptime). No prompts, IPs, or user data.",
+    }
+
+
+@router.post("/settings/telemetry")
+async def set_telemetry(request: Request):
+    """Toggle telemetry opt-in. Persists to .env file."""
+    import logging
+    node = request.app.state.node
+    body = await request.json()
+    enabled = bool(body.get("enabled", False))
+
+    # Update runtime setting (Pydantic v2 supports attribute assignment)
+    try:
+        object.__setattr__(node._settings, "telemetry", enabled)
+    except Exception as e:
+        logging.getLogger("mycellm.api").warning(f"Failed to set telemetry: {e}")
+        return {"error": str(e)}
+
+    # Persist to .env
+    try:
+        env_path = node._settings.config_dir / ".env"
+        env_path.parent.mkdir(parents=True, exist_ok=True)
+        env_lines = {}
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, _, val = line.partition("=")
+                    env_lines[key.strip()] = val.strip()
+        env_lines["MYCELLM_TELEMETRY"] = str(enabled).lower()
+        env_path.write_text("\n".join(f"{k}={v}" for k, v in env_lines.items()) + "\n")
+    except Exception as e:
+        logging.getLogger("mycellm.api").warning(f"Failed to persist telemetry to .env: {e}")
+
+    return {"enabled": enabled}
+
+
+@router.get("/public/stats")
+async def public_stats(request: Request):
+    """Public network stats — no auth required.
+
+    Returns aggregate network information suitable for a public stats page.
+    No IPs, keys, or sensitive data exposed.
+    """
+    node = request.app.state.node
+
+    # Network info
+    network_name = "mycellm"
+    is_public = False
+    if hasattr(node, "federation") and node.federation and node.federation.identity:
+        network_name = node.federation.identity.network_name
+        is_public = node.federation.identity.public
+
+    # Node counts
+    approved_nodes = [n for n in node.node_registry.values() if n.get("status") == "approved"]
+    online_nodes = [n for n in approved_nodes if time.time() - n.get("last_seen", 0) < 120]
+    seeding_nodes = [n for n in online_nodes if n.get("role") == "seeder"]
+
+    # Compute aggregates
+    total_vram_gb = 0.0
+    total_ram_gb = 0.0
+    for entry in approved_nodes:
+        sys = entry.get("system", {})
+        hw = sys.get("gpu", entry.get("capabilities", {}).get("hardware", {}))
+        mem = sys.get("memory", {})
+        total_vram_gb += hw.get("vram_gb", 0)
+        total_ram_gb += mem.get("total_gb", 0)
+
+    # Add self
+    sys_info = node.get_system_info()
+    total_vram_gb += node.capabilities.hardware.vram_gb
+    total_ram_gb += sys_info.get("memory", {}).get("total_gb", 0)
+    total_tps = node.activity.tps if hasattr(node, "activity") else 0
+
+    # Models (no sensitive info)
+    model_names = set()
+    for m in node.inference.loaded_models:
+        model_names.add(m.name)
+    for entry in approved_nodes:
+        for m in entry.get("capabilities", {}).get("models", []):
+            name = m.get("name", m) if isinstance(m, dict) else m
+            model_names.add(name)
+
+    # Activity stats — combine local stats with telemetry from announcing nodes
+    local_stats = node.activity.stats() if hasattr(node, "activity") else {}
+    network_requests = local_stats.get("total_requests", 0)
+    network_tokens = local_stats.get("total_tokens", 0)
+    network_tps = total_tps  # already includes local tps
+
+    for entry in online_nodes:
+        t = entry.get("telemetry", {})
+        if t:
+            network_requests += t.get("requests_total", 0)
+            network_tokens += t.get("tokens_total", 0)
+            network_tps += t.get("tps", 0)
+
+    # Top contributors (by node name only — no IPs or peer IDs)
+    contributors = []
+    for entry in online_nodes:
+        t = entry.get("telemetry", {})
+        contributors.append({
+            "name": entry.get("node_name", "anonymous"),
+            "tps": t.get("tps", 0),
+            "models": len(t.get("models_loaded", entry.get("capabilities", {}).get("models", []))),
+            "requests": t.get("requests_total", 0),
+        })
+    contributors.sort(key=lambda c: c["tps"], reverse=True)
+
+    # Growth data if available
+    growth = {}
+    if hasattr(node, "_growth_snapshots"):
+        growth = node._growth_snapshots
+
+    return {
+        "network_name": network_name,
+        "nodes": {
+            "total": 1 + len(approved_nodes),
+            "online": 1 + len(online_nodes),
+            "seeding": 1 + len(seeding_nodes),
+        },
+        "compute": {
+            "total_tps": round(network_tps, 1),
+            "total_vram_gb": round(total_vram_gb, 1),
+            "total_ram_gb": round(total_ram_gb, 1),
+        },
+        "models": {
+            "total_loaded": len(node.inference.loaded_models) + sum(
+                len(n.get("capabilities", {}).get("models", [])) for n in online_nodes
+            ),
+            "unique": len(model_names),
+            "names": sorted(model_names),
+        },
+        "activity": {
+            "total_requests": network_requests,
+            "total_tokens": network_tokens,
+            "requests_per_min": local_stats.get("requests_per_min", 0),
+        },
+        "top_contributors": contributors[:10],
+        "growth": growth,
+        "uptime_seconds": round(node.uptime),
     }
 
 

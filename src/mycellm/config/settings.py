@@ -66,7 +66,7 @@ class MycellmSettings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="MYCELLM_",
-        env_file=".env",
+        env_file=(".env", str(_default_config_dir() / ".env")),
         env_file_encoding="utf-8",
     )
 
@@ -98,9 +98,26 @@ class MycellmSettings(BaseSettings):
     # Bootstrap peers (comma-separated host:port)
     bootstrap_peers: str = ""
 
+    # Database URL — optional override (MYCELLM_DB_URL env var)
+    # Default: SQLite at data_dir/mycellm.db
+    # PostgreSQL: "postgresql+asyncpg://user:pass@host/dbname"
+    db_url: str = ""
+
+    # Logging
+    log_level: str = "INFO"  # DEBUG, INFO, WARNING, ERROR
+
+    # HuggingFace token (MYCELLM_HF_TOKEN env var)
+    # Unlocks gated models, higher rate limits, faster downloads
+    hf_token: str = ""
+
     # Security — optional API key (MYCELLM_API_KEY env var)
     # When set, all API endpoints (except /health) require Authorization: Bearer <key>
     api_key: str = ""
+
+    # Telemetry — opt-in anonymous usage stats sent to bootstrap node
+    # Includes: request/token counts, TPS, model names, uptime, credits earned
+    # Does NOT include: prompts, IPs, user data, API keys
+    telemetry: bool = False
 
     # Credit
     initial_credits: float = 100.0

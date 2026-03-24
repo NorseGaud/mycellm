@@ -4,7 +4,9 @@ import {
   Send, Plus, Trash2, RefreshCw, MessageSquare, BarChart3, Network,
   Boxes, ChevronRight, Loader2, AlertCircle, Check, X, Eye, EyeOff,
   Radio, MonitorSmartphone, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown,
-  Wifi, WifiOff, Clock, TrendingUp, Heart, Gauge,
+  Wifi, WifiOff, Clock, TrendingUp, Heart, Gauge, LayoutGrid, List,
+  Download, CheckCircle, XCircle, AlertTriangle, HardDrive, Settings,
+  Lock, Unlock, ExternalLink, Copy,
 } from 'lucide-react'
 
 // ── Constants ──
@@ -25,6 +27,7 @@ const TABS = [
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'credits', label: 'Credits', icon: Key },
   { id: 'logs', label: 'Logs', icon: Terminal },
+  { id: 'settings', label: 'Settings', icon: Settings },
 ]
 
 const LOG_TAG_COLORS = {
@@ -62,11 +65,12 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
       role: 'bootstrap',
       x: 0, y: 0,
       vx: 0, vy: 0,
-      r: 6,
+      r: 8,
       color: '#22C55E', // spore
       models: selfNode?.models?.length || 0,
       fixed: true,
       pulse: 0,
+      isFleet: true,
     })
 
     // QUIC peers
@@ -79,11 +83,12 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
         x: existing?.x || (Math.random() - 0.5) * 300,
         y: existing?.y || (Math.random() - 0.5) * 200,
         vx: 0, vy: 0,
-        r: 4,
+        r: 5,
         color: p.status === 'routable' ? '#3B82F6' : '#666',
         models: p.models?.length || 0,
         connectedTo: 'self',
         pulse: 0,
+        isFleet: true,
       })
     }
 
@@ -98,11 +103,12 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
         x: existing?.x || (Math.random() - 0.5) * 400,
         y: existing?.y || (Math.random() - 0.5) * 300,
         vx: 0, vy: 0,
-        r: 4,
+        r: 6,
         color: '#FACC15', // ledger (fleet = gold)
         models: (f.capabilities?.models || []).length,
         connectedTo: 'self',
         pulse: 0,
+        isFleet: true,
       })
     }
 
@@ -206,12 +212,13 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
         const target = nodes.find(n => n.id === node.connectedTo)
         if (!target) continue
 
-        const alpha = 0.08 + Math.max(node.pulse, target.pulse) * 0.15
+        const isFleetEdge = node.isFleet && target.isFleet
+        const alpha = (isFleetEdge ? 0.15 : 0.06) + Math.max(node.pulse, target.pulse) * 0.2
         ctx.beginPath()
         ctx.moveTo(cx + node.x, cy + node.y)
         ctx.lineTo(cx + target.x, cy + target.y)
         ctx.strokeStyle = `rgba(34, 197, 94, ${alpha})`
-        ctx.lineWidth = 0.8
+        ctx.lineWidth = isFleetEdge ? 1.2 : 0.5
         ctx.stroke()
       }
 
@@ -254,7 +261,8 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
         ctx.beginPath()
         ctx.arc(nx, ny, node.r, 0, Math.PI * 2)
         ctx.fillStyle = node.color
-        ctx.globalAlpha = 0.15 + node.pulse * 0.5
+        const baseAlpha = node.isFleet ? 0.35 : 0.12
+        ctx.globalAlpha = baseAlpha + node.pulse * 0.5
         ctx.fill()
         ctx.globalAlpha = 1
 
@@ -262,17 +270,17 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
         ctx.beginPath()
         ctx.arc(nx, ny, node.r, 0, Math.PI * 2)
         ctx.strokeStyle = node.color
-        ctx.lineWidth = 1
-        ctx.globalAlpha = 0.3 + node.pulse * 0.5
+        ctx.lineWidth = node.isFleet ? 1.5 : 0.5
+        ctx.globalAlpha = (node.isFleet ? 0.5 : 0.2) + node.pulse * 0.5
         ctx.stroke()
         ctx.globalAlpha = 1
 
-        // Label (only if enough nodes to be useful)
-        if (nodes.length > 1) {
-          ctx.font = '9px JetBrains Mono, monospace'
-          ctx.fillStyle = `rgba(229, 229, 229, ${0.15 + node.pulse * 0.3})`
+        // Label
+        if (node.isFleet) {
+          ctx.font = `${node.id === 'self' ? 'bold 11px' : '10px'} JetBrains Mono, monospace`
+          ctx.fillStyle = `rgba(229, 229, 229, ${0.4 + node.pulse * 0.4})`
           ctx.textAlign = 'center'
-          ctx.fillText(node.label, nx, ny + node.r + 12)
+          ctx.fillText(node.label, nx, ny + node.r + 14)
         }
       }
 
@@ -315,7 +323,8 @@ function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
   return (
     <canvas
       ref={canvasRef}
-      className="fixed inset-0 pointer-events-none z-0"
+      className="fixed inset-0 pointer-events-none"
+      style={{ zIndex: 1 }}
     />
   )
 }
@@ -426,7 +435,7 @@ function BootScreen({ onDone }) {
     <div className="min-h-screen bg-void text-console font-mono flex items-center justify-center p-6">
       <div className="max-w-2xl w-full border border-spore/20 bg-black/50 p-6 rounded-lg shadow-[0_0_30px_rgba(34,197,94,0.05)]">
         <div className="flex items-center space-x-4 mb-8">
-          <pre className="text-[6px] leading-none text-compute drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]">{ASCII_SHROOM}</pre>
+          <img src="/brand/mycellm-red-logo-sans.svg" alt="" className="h-12 drop-shadow-[0_0_8px_rgba(239,68,68,0.3)]" />
           <div>
             <h1 className="text-2xl font-bold tracking-tighter text-white">mycellm<span className="text-spore">_</span></h1>
             <p className="text-xs text-gray-500 uppercase tracking-widest">Boot Sequence</p>
@@ -946,6 +955,85 @@ function NodeDetailPanel({ node, onClose }) {
   )
 }
 
+// ── Hardware Card ──
+
+function HardwareCard({ node, compact = false }) {
+  const gpuName = node.gpu || 'CPU'
+  const isGpu = gpuName !== 'CPU' && gpuName !== 'none'
+  const vramPct = node.vram_gb > 0 ? Math.min(100, (node.ram_used_pct || 50)) : 0
+
+  const backendColors = { cuda: 'text-spore', metal: 'text-relay', rocm: 'text-poison', cpu: 'text-gray-500' }
+  const backendColor = backendColors[node.backend] || 'text-gray-500'
+
+  if (compact) {
+    return (
+      <div className={`border rounded-lg p-3 transition-colors ${node.online !== false ? 'border-white/10 bg-black' : 'border-white/5 bg-black/50 opacity-50'}`}>
+        <div className="flex items-center justify-between mb-1.5">
+          <div className="flex items-center space-x-2">
+            <div className={`w-2 h-2 rounded-full ${node.online !== false ? 'bg-spore' : 'bg-gray-600'}`} />
+            <span className="font-mono text-xs text-white truncate max-w-[120px]">{node.name}</span>
+          </div>
+          {node.tps > 0 && <span className="text-xs font-mono text-compute">{node.tps} T/s</span>}
+        </div>
+        <div className="text-xs text-gray-500 truncate">{gpuName}</div>
+        {node.models && node.models.length > 0 && (
+          <div className="text-xs text-gray-600 mt-1 truncate">{node.models.length} model{node.models.length !== 1 ? 's' : ''}</div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className={`border rounded-xl p-4 transition-colors ${node.online !== false ? 'border-white/10 bg-[#0d0d0d]' : 'border-white/5 bg-black/50 opacity-50'}`}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center space-x-2">
+          <div className={`w-2.5 h-2.5 rounded-full ${node.online !== false ? 'bg-spore' : 'bg-gray-600'}`} />
+          <span className="font-mono text-sm text-white font-medium">{node.name}</span>
+        </div>
+        <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${node.type === 'self' ? 'bg-spore/10 text-spore' : 'bg-white/5 text-gray-500'}`}>
+          {node.type}
+        </span>
+      </div>
+
+      {/* GPU / Accelerator */}
+      <div className="flex items-center space-x-2 mb-2">
+        <Cpu size={13} className={backendColor} />
+        <span className="text-sm text-gray-300">{gpuName}</span>
+      </div>
+
+      {/* VRAM / RAM gauge */}
+      {(node.vram_gb > 0 || node.ram_gb > 0) && (
+        <div className="mb-2">
+          <div className="flex justify-between text-xs text-gray-500 mb-0.5">
+            <span>{isGpu ? 'VRAM' : 'RAM'}</span>
+            <span>{isGpu ? node.vram_gb : node.ram_gb} GB</span>
+          </div>
+          <div className="w-full bg-void rounded-full h-1.5 overflow-hidden border border-white/5">
+            <div className={`h-full transition-all ${vramPct > 85 ? 'bg-compute' : vramPct > 60 ? 'bg-ledger' : 'bg-spore'}`}
+              style={{ width: `${vramPct || 30}%` }} />
+          </div>
+        </div>
+      )}
+
+      {/* Stats row */}
+      <div className="flex items-center space-x-3 text-xs text-gray-500 mt-2">
+        <span className={backendColor}>{(node.backend || 'cpu').toUpperCase()}</span>
+        {node.tps > 0 && <span className="text-compute font-mono">{node.tps} T/s</span>}
+        {node.models && <span>{node.models.length} model{node.models.length !== 1 ? 's' : ''}</span>}
+      </div>
+
+      {/* Model list */}
+      {node.models && node.models.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {node.models.map((m, i) => (
+            <span key={i} className="text-xs font-mono bg-white/5 text-gray-400 px-1.5 py-0.5 rounded truncate max-w-[150px]">{m}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Overview Tab ──
 
 function OverviewTab({ status, credits, fleetNodes }) {
@@ -955,11 +1043,22 @@ function OverviewTab({ status, credits, fleetNodes }) {
   const [liveEvents, setLiveEvents] = useState([])
   const [federation, setFederation] = useState(null)
   const [selectedNode, setSelectedNode] = useState(null)
+  const [fleetHardware, setFleetHardware] = useState(null)
+  const [fleetView, _setFleetView] = useState(() => localStorage.getItem('mycellm_fleet_view') || 'grid')
+  const setFleetView = (v) => { _setFleetView(v); localStorage.setItem('mycellm_fleet_view', v) }
+  const [fleetSort, _setFleetSort] = useState(() => localStorage.getItem('mycellm_fleet_sort') || 'name')
+  const setFleetSort = (v) => { _setFleetSort(v); localStorage.setItem('mycellm_fleet_sort', v) }
   const peers = status?.peers || []
   const models = status?.models || []
   const uptime = status?.uptime_seconds || 0
+  const mode = status?.mode || 'standalone'
 
   useEffect(() => { api('/v1/node/system').then(setSysInfo).catch(() => {}) }, [])
+  useEffect(() => {
+    api('/v1/node/fleet/hardware').then(setFleetHardware).catch(() => {})
+    const iv = setInterval(() => api('/v1/node/fleet/hardware').then(setFleetHardware).catch(() => {}), 10000)
+    return () => clearInterval(iv)
+  }, [])
   useEffect(() => {
     const f = () => api('/v1/node/connections').then(d => setConnections(d.connections || [])).catch(() => {})
     f(); const iv = setInterval(f, 5000); return () => clearInterval(iv)
@@ -1011,10 +1110,20 @@ function OverviewTab({ status, credits, fleetNodes }) {
             {roleIcons[status?.role] || '\u{1F5A5}\uFE0F'}
           </div>
           <div>
-            <h2 className="text-white font-mono font-bold text-sm">{status?.node_name || 'mycellm-node'}</h2>
+            <div className="flex items-center space-x-2">
+              <h2 className="text-white font-mono font-bold text-sm">{status?.node_name || 'mycellm-node'}</h2>
+              <span className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                mode === 'root' ? 'bg-ledger/10 text-ledger' :
+                mode === 'seeder' ? 'bg-spore/10 text-spore' :
+                mode === 'federated' ? 'bg-relay/10 text-relay' :
+                mode === 'consumer' ? 'bg-poison/10 text-poison' :
+                'bg-white/5 text-gray-500'
+              }`}>{mode}</span>
+            </div>
             <div className="flex items-center space-x-3 text-xs text-gray-500 mt-0.5">
               <span>{federation?.network_name || 'Standalone'}</span>
               {federation?.network_id && <span className="font-mono">{federation.network_id.slice(0, 8)}...</span>}
+              {federation?.public && <span className="text-spore">public</span>}
               <span>&middot;</span>
               <span>{formatUptime(uptime)} uptime</span>
             </div>
@@ -1035,6 +1144,94 @@ function OverviewTab({ status, credits, fleetNodes }) {
           </div>
         </div>
       </div>
+
+      {/* API Endpoint — drop-in LLM integration */}
+      {models.length > 0 && (() => {
+        const baseUrl = `${window.location.protocol}//${window.location.host}`
+        const apiKey = getApiKey()
+        return (
+          <div className="border border-white/10 bg-[#111] rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center space-x-2">
+                <Zap size={14} className="text-ledger" />
+                <h3 className="text-sm font-medium text-white">API Endpoint</h3>
+                <span className="text-xs px-1.5 py-0.5 rounded bg-spore/10 text-spore">OpenAI-compatible</span>
+              </div>
+              <button onClick={() => navigator.clipboard.writeText(`${baseUrl}/v1`)}
+                className="text-xs text-gray-500 hover:text-gray-300 flex items-center space-x-1">
+                <Copy size={11} />
+                <span>Copy</span>
+              </button>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm font-mono">
+              <div className="bg-black/50 rounded-lg p-3 space-y-1.5">
+                <div className="text-xs text-gray-500">Base URL</div>
+                <div className="text-spore break-all">{baseUrl}/v1</div>
+              </div>
+              <div className="bg-black/50 rounded-lg p-3 space-y-1.5">
+                <div className="text-xs text-gray-500">Endpoint</div>
+                <div className="text-white break-all">/v1/chat/completions</div>
+              </div>
+            </div>
+            <details className="mt-3 text-xs">
+              <summary className="text-gray-500 cursor-pointer hover:text-gray-300">Usage examples</summary>
+              <div className="mt-2 space-y-3">
+                <div className="bg-black/50 rounded-lg p-3">
+                  <div className="text-gray-500 mb-1">Python (OpenAI SDK)</div>
+                  <pre className="text-gray-300 whitespace-pre-wrap font-mono">{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="${baseUrl}/v1",${apiKey ? `\n    api_key="${apiKey}",` : ''}
+)
+response = client.chat.completions.create(
+    model="${models[0]?.name || 'auto'}",
+    messages=[{"role": "user", "content": "Hello"}],
+)`}</pre>
+                </div>
+                <div className="bg-black/50 rounded-lg p-3">
+                  <div className="text-gray-500 mb-1">curl</div>
+                  <pre className="text-gray-300 whitespace-pre-wrap font-mono">{`curl ${baseUrl}/v1/chat/completions \\
+  -H "Content-Type: application/json" \\${apiKey ? `\n  -H "Authorization: Bearer ${apiKey}" \\` : ''}
+  -d '{"model": "${models[0]?.name || 'auto'}", "messages": [{"role": "user", "content": "Hello"}]}'`}</pre>
+                </div>
+                <div className="bg-black/50 rounded-lg p-3">
+                  <div className="text-gray-500 mb-1">Environment variables (works with most tools)</div>
+                  <pre className="text-gray-300 whitespace-pre-wrap font-mono">{`OPENAI_BASE_URL=${baseUrl}/v1
+OPENAI_API_KEY=${apiKey || 'your-api-key'}
+OPENAI_MODEL=${models[0]?.name || 'auto'}`}</pre>
+                </div>
+              </div>
+            </details>
+          </div>
+        )
+      })()}
+
+      {/* Aggregate Fleet Banner (root mode) */}
+      {fleetHardware && fleetHardware.aggregate && (
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
+            <div className="text-xs text-gray-500 font-mono">NODES</div>
+            <div className="text-2xl font-mono text-white mt-1">{fleetHardware.aggregate.online_nodes}/{fleetHardware.aggregate.total_nodes}</div>
+          </div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
+            <div className="text-xs text-gray-500 font-mono">AGGREGATE T/s</div>
+            <div className="text-2xl font-mono text-compute mt-1">{fleetHardware.aggregate.total_tps}</div>
+          </div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
+            <div className="text-xs text-gray-500 font-mono">COMPUTE</div>
+            <div className="text-2xl font-mono text-relay mt-1">{fleetHardware.aggregate.total_vram_gb}GB</div>
+            <div className="text-xs text-gray-600">VRAM</div>
+          </div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
+            <div className="text-xs text-gray-500 font-mono">RAM</div>
+            <div className="text-2xl font-mono text-poison mt-1">{fleetHardware.aggregate.total_ram_gb}GB</div>
+          </div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
+            <div className="text-xs text-gray-500 font-mono">MODELS</div>
+            <div className="text-2xl font-mono text-spore mt-1">{fleetHardware.aggregate.total_models}</div>
+          </div>
+        </div>
+      )}
 
       {/* Stats Row with Sparklines */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
@@ -1064,43 +1261,145 @@ function OverviewTab({ status, credits, fleetNodes }) {
           <div className="text-xs text-gray-600">+{credits.earned?.toFixed(1) || '0'} / -{credits.spent?.toFixed(1) || '0'}</div>
         </div>
         <div className="border border-white/10 bg-[#111] rounded-xl p-4">
-          <div className="text-xs text-gray-500 font-mono">INFERENCE</div>
-          <div className={`text-2xl font-mono mt-1 ${(status?.inference?.active || 0) > 0 ? 'text-compute animate-pulse' : 'text-gray-400'}`}>
-            {status?.inference?.active || 0}/{status?.inference?.max_concurrent || 2}
+          <div className="text-xs text-gray-500 font-mono">THROUGHPUT</div>
+          <div className={`text-2xl font-mono mt-1 ${stats.tps > 0 ? 'text-compute' : 'text-gray-400'}`}>
+            {stats.tps || 0} <span className="text-sm text-gray-500">T/s</span>
           </div>
-          <div className="text-xs text-gray-600">{(status?.inference?.active || 0) > 0 ? 'processing' : 'idle'}</div>
+          <div className="text-xs text-gray-600">{stats.avg_latency_ms ? `${stats.avg_latency_ms}ms avg` : 'idle'}</div>
         </div>
       </div>
 
       {/* Network Health */}
       <NetworkHealthBar connections={connections} peers={peers} fleetNodes={fleetNodes || []} />
 
-      {/* Fleet Grid */}
-      {fleetGrid.length > 1 && (
-        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
-          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-3">Fleet ({fleetGrid.length} nodes)</h2>
-          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-            {fleetGrid.map(node => (
-              <button key={node.id} onClick={() => setSelectedNode(node)}
-                className={`text-left bg-black border rounded-lg p-3 hover:bg-white/[0.03] transition-colors ${
-                  node.type === 'self' ? 'border-spore/30' : node.status === 'fleet' ? 'border-ledger/20' : 'border-white/10'
-                }`}>
-                <div className="flex items-center justify-between mb-1.5">
-                  <div className="flex items-center space-x-2">
-                    <span className="text-sm">{roleIcons[node.role] || '\u{1F5A5}\uFE0F'}</span>
-                    <span className="font-mono text-xs text-white truncate max-w-[100px]">{node.name}</span>
-                  </div>
-                  <div className={`w-2 h-2 rounded-full ${statusDots[node.status] || 'bg-gray-600'}`} />
-                </div>
-                <div className="text-xs text-gray-500">
-                  {node.modelCount} model{node.modelCount !== 1 ? 's' : ''}
-                  <span className="mx-1">&middot;</span>
-                  <span className={node.type === 'self' ? 'text-spore' : node.type === 'fleet' ? 'text-ledger' : 'text-relay'}>{node.type}</span>
-                </div>
-              </button>
-            ))}
+      {/* Fleet Hardware */}
+      {fleetHardware && fleetHardware.nodes && fleetHardware.nodes.length > 1 && (() => {
+        const sortDir = fleetSort.startsWith('-') ? 'desc' : 'asc'
+        const sortKey = fleetSort.replace(/^-/, '')
+        const sorted = [...fleetHardware.nodes].sort((a, b) => {
+          // Self always first
+          if (a.type === 'self') return -1
+          if (b.type === 'self') return 1
+          let av, bv
+          switch (sortKey) {
+            case 'name': av = (a.name || '').toLowerCase(); bv = (b.name || '').toLowerCase(); break
+            case 'gpu': av = (a.gpu || '').toLowerCase(); bv = (b.gpu || '').toLowerCase(); break
+            case 'backend': av = (a.backend || '').toLowerCase(); bv = (b.backend || '').toLowerCase(); break
+            case 'ram': av = a.ram_gb || 0; bv = b.ram_gb || 0; break
+            case 'tps': av = a.tps || 0; bv = b.tps || 0; break
+            case 'models': av = (a.models || []).length; bv = (b.models || []).length; break
+            case 'status': av = a.online !== false ? 1 : 0; bv = b.online !== false ? 1 : 0; break
+            default: av = (a.name || ''); bv = (b.name || '')
+          }
+          if (av < bv) return sortDir === 'asc' ? -1 : 1
+          if (av > bv) return sortDir === 'asc' ? 1 : -1
+          return 0
+        })
+        const toggleSort = (key) => {
+          if (sortKey === key) {
+            setFleetSort(sortDir === 'asc' ? `-${key}` : key)
+          } else {
+            setFleetSort(key)
+          }
+        }
+        const SortIcon = ({ col }) => {
+          if (sortKey !== col) return <ArrowUpDown size={10} className="text-gray-600 ml-1" />
+          return sortDir === 'asc' ? <ArrowUp size={10} className="text-spore ml-1" /> : <ArrowDown size={10} className="text-spore ml-1" />
+        }
+        return (
+          <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest flex items-center space-x-2">
+                <Cpu size={12} />
+                <span>Fleet Hardware ({fleetHardware.nodes.length} nodes)</span>
+                {fleetHardware.aggregate && fleetHardware.aggregate.total_tps > 0 && (
+                  <span className="text-compute font-mono ml-2">{fleetHardware.aggregate.total_tps} T/s aggregate</span>
+                )}
+              </h2>
+              <div className="flex items-center border border-white/10 rounded-lg overflow-hidden">
+                <button onClick={() => setFleetView('grid')}
+                  className={`p-1.5 transition-colors ${fleetView === 'grid' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                  title="Grid view">
+                  <LayoutGrid size={14} />
+                </button>
+                <button onClick={() => setFleetView('list')}
+                  className={`p-1.5 transition-colors ${fleetView === 'list' ? 'bg-white/10 text-white' : 'text-gray-500 hover:text-gray-300'}`}
+                  title="List view">
+                  <List size={14} />
+                </button>
+              </div>
+            </div>
+
+            {fleetView === 'grid' ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {sorted.map((n, i) => (
+                  <HardwareCard key={i} node={n} />
+                ))}
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs font-mono">
+                  <thead>
+                    <tr className="text-gray-500 border-b border-white/5">
+                      <th className="text-left py-2 px-2 font-normal w-6"></th>
+                      <th className="text-left py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('name')}>
+                        <span className="flex items-center">Node<SortIcon col="name" /></span>
+                      </th>
+                      <th className="text-left py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('gpu')}>
+                        <span className="flex items-center">GPU<SortIcon col="gpu" /></span>
+                      </th>
+                      <th className="text-left py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('backend')}>
+                        <span className="flex items-center">Backend<SortIcon col="backend" /></span>
+                      </th>
+                      <th className="text-right py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('ram')}>
+                        <span className="flex items-center justify-end">RAM<SortIcon col="ram" /></span>
+                      </th>
+                      <th className="text-right py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('tps')}>
+                        <span className="flex items-center justify-end">T/s<SortIcon col="tps" /></span>
+                      </th>
+                      <th className="text-right py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('models')}>
+                        <span className="flex items-center justify-end">Models<SortIcon col="models" /></span>
+                      </th>
+                      <th className="text-right py-2 px-2 font-normal cursor-pointer select-none" onClick={() => toggleSort('status')}>
+                        <span className="flex items-center justify-end">Status<SortIcon col="status" /></span>
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sorted.map((n, i) => {
+                      const backendColors = { cuda: 'text-spore', metal: 'text-relay', rocm: 'text-poison', cpu: 'text-gray-500' }
+                      return (
+                        <tr key={i} className="border-b border-white/5 hover:bg-white/[0.02] transition-colors">
+                          <td className="py-2 px-2">
+                            <div className={`w-2 h-2 rounded-full ${n.online !== false ? 'bg-spore' : 'bg-gray-600'}`} />
+                          </td>
+                          <td className="py-2 px-2 text-white">{n.name}</td>
+                          <td className="py-2 px-2 text-gray-300">{n.gpu || 'CPU'}</td>
+                          <td className="py-2 px-2">
+                            <span className={backendColors[n.backend] || 'text-gray-500'}>{(n.backend || 'cpu').toUpperCase()}</span>
+                          </td>
+                          <td className="py-2 px-2 text-right text-gray-400">{n.ram_gb ? `${n.ram_gb} GB` : '-'}</td>
+                          <td className="py-2 px-2 text-right text-compute">{n.tps > 0 ? n.tps : '-'}</td>
+                          <td className="py-2 px-2 text-right text-gray-400">{(n.models || []).length}</td>
+                          <td className="py-2 px-2 text-right">
+                            <span className={n.online !== false ? 'text-spore' : 'text-gray-500'}>
+                              {n.online !== false ? 'Online' : 'Offline'}
+                            </span>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
-        </div>
+        )
+      })()}
+
+      {/* Single node hardware card (standalone) */}
+      {fleetHardware && fleetHardware.nodes && fleetHardware.nodes.length === 1 && (
+        <HardwareCard node={fleetHardware.nodes[0]} />
       )}
 
       {/* Activity Feed */}
@@ -1344,6 +1643,286 @@ function SortHeader({ label, field, sortBy, sortDir, onSort }) {
   )
 }
 
+// ── Model Table with inline edit ──
+
+function ModelTable({ allModels, stateIndicator, stateNameColor, stateBadge, doApi, refreshAll, nodeApi }) {
+  const [editingModel, setEditingModel] = useState(null) // model name being edited
+  const [editForm, setEditForm] = useState({})
+  const [editLoading, setEditLoading] = useState(false)
+  const [editError, setEditError] = useState('')
+
+  const startEdit = async (modelName) => {
+    if (editingModel === modelName) { setEditingModel(null); return }
+    try {
+      const config = await nodeApi(`/v1/node/models/${encodeURIComponent(modelName)}/config`)
+      setEditForm({
+        name: config.name || modelName,
+        api_base: config.api_base || '',
+        api_model: config.api_model || '',
+        api_key: '',  // don't pre-fill — show hint
+        api_key_hint: config.api_key_hint || '',
+        ctx_len: config.ctx_len || 4096,
+        backend: config.backend || 'openai',
+      })
+      setEditError('')
+      setEditingModel(modelName)
+    } catch { setEditingModel(null) }
+  }
+
+  const saveEdit = async () => {
+    setEditLoading(true)
+    setEditError('')
+    try {
+      const body = { model: editingModel }
+      if (editForm.api_base) body.api_base = editForm.api_base
+      if (editForm.api_model) body.api_model = editForm.api_model
+      if (editForm.api_key) body.api_key = editForm.api_key
+      if (editForm.ctx_len) body.ctx_len = editForm.ctx_len
+      const result = await doApi('/v1/node/models/update', body)
+      if (result.error) {
+        setEditError(result.error)
+      } else {
+        setEditingModel(null)
+        refreshAll()
+      }
+    } catch (e) {
+      setEditError(e.message)
+    }
+    setEditLoading(false)
+  }
+
+  return (
+    <table className="w-full text-sm">
+      <thead className="bg-black/30">
+        <tr className="text-xs text-gray-500 font-mono uppercase">
+          <th className="text-left py-2 px-4 w-7"></th>
+          <th className="text-left py-2 px-4">Name</th>
+          <th className="text-left py-2 px-4 hidden md:table-cell">Backend</th>
+          <th className="text-left py-2 px-4 hidden md:table-cell">Quant</th>
+          <th className="text-left py-2 px-4 hidden md:table-cell">Size</th>
+          <th className="text-left py-2 px-4 hidden lg:table-cell">Status</th>
+          <th className="text-right py-2 px-4">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {allModels.map((m) => (
+          <React.Fragment key={m.name}>
+            <tr className={`border-t border-white/5 transition-all duration-300 ${
+              editingModel === m.name ? 'bg-white/[0.05]' :
+              m.state === 'loading' ? 'bg-ledger/[0.03]' :
+              m.state === 'failed' ? 'bg-compute/[0.03]' :
+              m.state === 'active' ? 'hover:bg-white/[0.02]' :
+              'hover:bg-white/[0.02] opacity-70'
+            }`}>
+              <td className="py-2.5 px-4" title={m.state}>{stateIndicator[m.state]}</td>
+              <td className={`py-2.5 px-4 font-mono ${stateNameColor[m.state]}`}>
+                {m.name}
+                {m.state === 'loading' && m.phase && (
+                  <div className="text-xs text-ledger/70 font-sans mt-0.5">{m.phase}{m.elapsed ? ` · ${m.elapsed}s` : ''}</div>
+                )}
+                {m.state === 'failed' && m.error && (
+                  <div className="text-xs text-compute/70 font-sans mt-0.5 truncate max-w-[250px]" title={m.error}>{m.error}</div>
+                )}
+              </td>
+              <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell">{m.backend}</td>
+              <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell font-mono">{m.quant || '-'}</td>
+              <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell">{m.size || '-'}</td>
+              <td className="py-2.5 px-4 hidden lg:table-cell">{stateBadge[m.state]}</td>
+              <td className="py-2.5 px-4 text-right space-x-2 whitespace-nowrap">
+                {m.state === 'active' && (
+                  <>
+                    {m.backend !== 'llama.cpp' && (
+                      <button onClick={() => startEdit(m.name)}
+                        className={`text-xs transition-colors ${editingModel === m.name ? 'text-spore' : 'text-gray-500 hover:text-relay'}`}>edit</button>
+                    )}
+                    <button onClick={async () => { await doApi('/v1/node/models/unload', { model: m.name }); refreshAll() }}
+                      className="text-xs text-gray-500 hover:text-ledger transition-colors">unload</button>
+                    {m.hasFile && (
+                      <button onClick={async () => {
+                        if (confirm(`Delete ${m.filename}? This will unload and remove the file.`)) {
+                          await doApi('/v1/node/models/delete-file', { filename: m.filename }); refreshAll()
+                        }
+                      }} className="text-xs text-gray-600 hover:text-compute transition-colors">delete</button>
+                    )}
+                  </>
+                )}
+                {m.state === 'on-disk' && (
+                  <>
+                    <button onClick={async () => {
+                      await doApi('/v1/node/models/load', { model_path: m.filePath, name: m.name, backend: 'llama.cpp', ctx_len: m.ctx || 4096 })
+                      refreshAll()
+                    }} className="text-xs text-spore hover:text-spore/80 transition-colors">load</button>
+                    <button onClick={async () => {
+                      if (confirm(`Delete ${m.filename}?`)) { await doApi('/v1/node/models/delete-file', { filename: m.filename }); refreshAll() }
+                    }} className="text-xs text-gray-600 hover:text-compute transition-colors">delete</button>
+                  </>
+                )}
+                {m.state === 'disabled' && (
+                  <>
+                    {m.backend !== 'llama.cpp' && (
+                      <button onClick={() => startEdit(m.name)}
+                        className="text-xs text-gray-500 hover:text-relay transition-colors">edit</button>
+                    )}
+                    <button onClick={async () => { await doApi('/v1/node/models/reload', { model: m.name }); refreshAll() }}
+                      className="text-xs text-spore hover:text-spore/80 transition-colors">enable</button>
+                    <button onClick={async () => {
+                      if (confirm(`Remove config for ${m.name}?`)) { await doApi('/v1/node/models/remove-config', { model: m.name }); refreshAll() }
+                    }} className="text-xs text-gray-600 hover:text-compute transition-colors">remove</button>
+                  </>
+                )}
+                {m.state === 'loading' && (
+                  <span className="text-xs text-gray-600 font-mono">{m.elapsed ? `${m.elapsed}s` : '...'}</span>
+                )}
+              </td>
+            </tr>
+            {/* Inline edit panel */}
+            {editingModel === m.name && (
+              <tr><td colSpan={7} className="px-4 py-3 border-t border-spore/10 bg-white/[0.02]">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <label className="text-gray-500 block mb-0.5">API Base URL</label>
+                    <input value={editForm.api_base} onChange={e => setEditForm(f => ({...f, api_base: e.target.value}))}
+                      className="w-full bg-black border border-white/10 rounded px-2 py-1.5 font-mono text-white focus:border-spore/50 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-gray-500 block mb-0.5">Upstream Model</label>
+                    <input value={editForm.api_model} onChange={e => setEditForm(f => ({...f, api_model: e.target.value}))}
+                      className="w-full bg-black border border-white/10 rounded px-2 py-1.5 font-mono text-white focus:border-spore/50 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-gray-500 block mb-0.5">API Key {editForm.api_key_hint && <span className="text-gray-600">(current: {editForm.api_key_hint})</span>}</label>
+                    <input type="password" value={editForm.api_key} onChange={e => setEditForm(f => ({...f, api_key: e.target.value}))}
+                      placeholder="Leave empty to keep current key"
+                      className="w-full bg-black border border-white/10 rounded px-2 py-1.5 font-mono text-white focus:border-spore/50 focus:outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-gray-500 block mb-0.5">Context Length</label>
+                    <input type="number" value={editForm.ctx_len} onChange={e => setEditForm(f => ({...f, ctx_len: parseInt(e.target.value) || 4096}))}
+                      className="w-full bg-black border border-white/10 rounded px-2 py-1.5 font-mono text-white focus:border-spore/50 focus:outline-none" />
+                  </div>
+                </div>
+                {editError && <div className="text-compute text-xs mt-2">{editError}</div>}
+                <div className="flex items-center space-x-2 mt-3">
+                  <button onClick={saveEdit} disabled={editLoading}
+                    className="bg-spore text-black px-3 py-1 rounded text-xs font-medium hover:bg-spore/90 disabled:opacity-40">
+                    {editLoading ? 'Saving...' : 'Save & Reload'}
+                  </button>
+                  <button onClick={() => setEditingModel(null)}
+                    className="text-xs text-gray-500 hover:text-white px-3 py-1">Cancel</button>
+                </div>
+              </td></tr>
+            )}
+          </React.Fragment>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+// Quant quality descriptions
+const QUANT_INFO = {
+  'Q2_K':   { quality: 'Low',         desc: 'Smallest, lowest quality. Testing only.', stars: 1 },
+  'Q3_K_S': { quality: 'Low-Med',     desc: 'Small but noticeable quality loss.',       stars: 2 },
+  'Q3_K_M': { quality: 'Medium-Low',  desc: 'Decent balance for very constrained RAM.', stars: 2 },
+  'Q3_K_L': { quality: 'Medium-Low',  desc: 'Better than Q3_K_M, still small.',        stars: 2 },
+  'Q4_K_S': { quality: 'Good',        desc: 'Good quality, smaller than Q4_K_M.',       stars: 3 },
+  'Q4_K_M': { quality: 'Recommended', desc: 'Best balance of quality and size.',        stars: 4 },
+  'Q4_0':   { quality: 'Good',        desc: 'Older quant format, decent quality.',       stars: 3 },
+  'Q5_K_S': { quality: 'High',        desc: 'High quality, moderate size increase.',     stars: 4 },
+  'Q5_K_M': { quality: 'High',        desc: 'Very good quality, recommended if RAM allows.', stars: 4 },
+  'Q6_K':   { quality: 'Very High',   desc: 'Near-original quality.',                    stars: 5 },
+  'Q8_0':   { quality: 'Excellent',   desc: 'Almost lossless. Large file.',              stars: 5 },
+  'F16':    { quality: 'Full',        desc: 'Full 16-bit precision. Very large.',        stars: 5 },
+  'F32':    { quality: 'Full',        desc: 'Full 32-bit precision. Maximum size.',      stars: 5 },
+  'IQ4_NL': { quality: 'Good',        desc: 'iQuant: good quality, small size.',         stars: 3 },
+  'IQ4_XS': { quality: 'Good',        desc: 'iQuant: slightly smaller than IQ4_NL.',     stars: 3 },
+}
+
+function VariantTable({ repoFiles, filterCompatible, downloadStatus, localFiles, models, onDownload }) {
+  const files = (repoFiles?.files || []).filter(f => !filterCompatible || !f.warnings || f.warnings.length === 0)
+  if (files.length === 0) return <div className="ml-6 py-2 text-xs text-gray-600">No compatible variants{filterCompatible ? ' (try Show all)' : ''}</div>
+
+  return (
+    <div className="ml-6 mr-2 mb-2 border-l border-spore/20 pl-3">
+      <div className="flex items-center space-x-3 mb-1.5 text-xs text-gray-500">
+        {repoFiles.param_b > 0 && <span>{repoFiles.param_b}B params</span>}
+        {repoFiles.architecture && <span>{repoFiles.architecture}</span>}
+        {repoFiles.context_length > 0 && <span>{repoFiles.context_length.toLocaleString()} ctx</span>}
+        {repoFiles.disk_free_gb > 0 && <span className="text-gray-600">{repoFiles.disk_free_gb}GB free</span>}
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-gray-600 font-mono uppercase">
+            <th className="text-left py-1 pr-2 w-20">Quant</th>
+            <th className="text-left py-1 pr-2">Quality</th>
+            <th className="text-left py-1 pr-2 w-24 hidden sm:table-cell">Rating</th>
+            <th className="text-right py-1 pr-2">Size</th>
+            <th className="text-right py-1 pr-2">RAM</th>
+            <th className="text-right py-1 w-24"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {files.map((f, i) => {
+            const dl = Object.values(downloadStatus).find(d => d.filename === f.filename && d.repo_id === repoFiles.repo_id)
+            const hasWarnings = f.warnings && f.warnings.length > 0
+            const isOnDisk = localFiles.some(lf => lf.filename === f.filename)
+            const isLoaded = models.some(md => f.filename.replace('.gguf', '') === md.name)
+            const qi = QUANT_INFO[f.quant] || { quality: '?', desc: '', stars: 0 }
+            const quantColor = f.quant?.startsWith('Q4') ? 'text-spore bg-spore/10' :
+              f.quant?.startsWith('Q5') || f.quant?.startsWith('Q6') ? 'text-relay bg-relay/10' :
+              f.quant?.startsWith('Q8') || f.quant === 'F16' ? 'text-poison bg-poison/10' :
+              f.quant?.startsWith('Q2') || f.quant?.startsWith('Q3') ? 'text-ledger bg-ledger/10' :
+              'text-gray-500 bg-white/5'
+
+            return (
+              <tr key={i} className={`border-t border-white/5 ${hasWarnings && !isOnDisk ? 'opacity-40' : 'hover:bg-white/[0.02]'}`}>
+                <td className="py-1.5 pr-2">
+                  <span className={`font-mono px-1.5 py-0.5 rounded ${quantColor}`}>{f.quant || '?'}</span>
+                </td>
+                <td className="py-1.5 pr-2 text-gray-400" title={qi.desc}>
+                  {qi.quality}
+                </td>
+                <td className="py-1.5 pr-2 hidden sm:table-cell">
+                  <span className={`${qi.stars >= 4 ? 'text-spore' : qi.stars >= 3 ? 'text-ledger' : 'text-gray-600'}`}>
+                    {'★'.repeat(qi.stars)}{'☆'.repeat(5 - qi.stars)}
+                  </span>
+                </td>
+                <td className="py-1.5 pr-2 text-right text-gray-400 font-mono">{f.size_gb}GB</td>
+                <td className="py-1.5 pr-2 text-right text-gray-600">{f.est_ram_gb ? `~${f.est_ram_gb}` : '?'}GB</td>
+                <td className="py-1.5 text-right">
+                  {dl && dl.status === 'downloading' ? (
+                    <div className="inline-flex items-center space-x-1">
+                      <div className="w-12 bg-void rounded-full h-1 overflow-hidden border border-white/5">
+                        <div className="h-full bg-ledger" style={{ width: `${dl.progress || 0}%` }} />
+                      </div>
+                      <span className="text-ledger font-mono w-8 text-right">{dl.progress?.toFixed(0)}%</span>
+                    </div>
+                  ) : isOnDisk || (dl && dl.status === 'complete') ? (
+                    <span className="inline-flex items-center space-x-1">
+                      {isLoaded ? <CheckCircle size={12} className="text-spore" /> : <HardDrive size={12} className="text-gray-500" />}
+                      <span className={isLoaded ? 'text-spore' : 'text-gray-500'}>{isLoaded ? 'loaded' : 'on disk'}</span>
+                    </span>
+                  ) : dl && dl.status === 'failed' ? (
+                    <span className="inline-flex items-center space-x-1 text-compute"><XCircle size={12} /><span>failed</span></span>
+                  ) : hasWarnings ? (
+                    <button onClick={() => onDownload(f)} className="inline-flex items-center space-x-1 text-ledger hover:text-ledger/80">
+                      <AlertTriangle size={12} /><span>download</span>
+                    </button>
+                  ) : (
+                    <button onClick={() => onDownload(f)} className="inline-flex items-center space-x-1 text-spore hover:text-spore/80">
+                      <Download size={12} /><span>download</span>
+                    </button>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 function ModelsTab({ status, onRefresh }) {
   const [devices, setDevices] = useState([]) // merged local + fleet
   const [selected, _setSelected] = useState('local') // 'local' or api_addr
@@ -1379,6 +1958,12 @@ function ModelsTab({ status, onRefresh }) {
     api_base: 'https://openrouter.ai/api/v1', api_key: '', api_model: '', ctx_len: 4096,
   })
   const [showKey, setShowKey] = useState(false)
+  const [storedSecrets, setStoredSecrets] = useState([])
+
+  // Fetch stored secret names for the API key dropdown
+  useEffect(() => {
+    api('/v1/node/settings/secrets').then(d => setStoredSecrets(d.secrets || [])).catch(() => {})
+  }, [])
 
   // Build device list: local node + approved fleet nodes
   useEffect(() => {
@@ -1746,93 +2331,8 @@ function ModelsTab({ status, onRefresh }) {
               </h2>
             </div>
             {allModels.length > 0 ? (
-              <table className="w-full text-sm">
-                <thead className="bg-black/30">
-                  <tr className="text-xs text-gray-500 font-mono uppercase">
-                    <th className="text-left py-2 px-4 w-7"></th>
-                    <th className="text-left py-2 px-4">Name</th>
-                    <th className="text-left py-2 px-4 hidden md:table-cell">Backend</th>
-                    <th className="text-left py-2 px-4 hidden md:table-cell">Quant</th>
-                    <th className="text-left py-2 px-4 hidden md:table-cell">Size</th>
-                    <th className="text-left py-2 px-4 hidden lg:table-cell">Features</th>
-                    <th className="text-left py-2 px-4 hidden lg:table-cell">Status</th>
-                    <th className="text-right py-2 px-4">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {allModels.map((m) => (
-                    <tr key={m.name}
-                      className={`border-t border-white/5 transition-all duration-300 ${
-                        m.state === 'loading' ? 'bg-ledger/[0.03]' :
-                        m.state === 'failed' ? 'bg-compute/[0.03]' :
-                        m.state === 'active' ? 'hover:bg-white/[0.02]' :
-                        'hover:bg-white/[0.02] opacity-70'
-                      }`}>
-                      <td className="py-2.5 px-4" title={m.state}>{stateIndicator[m.state]}</td>
-                      <td className={`py-2.5 px-4 font-mono ${stateNameColor[m.state]}`}>
-                        {m.name}
-                        {m.state === 'loading' && m.phase && (
-                          <div className="text-xs text-ledger/70 font-sans mt-0.5">{m.phase}{m.elapsed ? ` · ${m.elapsed}s` : ''}</div>
-                        )}
-                        {m.state === 'failed' && m.error && (
-                          <div className="text-xs text-compute/70 font-sans mt-0.5 truncate max-w-[250px]" title={m.error}>{m.error}</div>
-                        )}
-                      </td>
-                      <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell">{m.backend}</td>
-                      <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell font-mono">{m.quant || '-'}</td>
-                      <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell">{m.size || '-'}</td>
-                      <td className="py-2.5 px-4 hidden lg:table-cell">
-                        {(m.features && m.features.length > 0) ? (
-                          <div className="flex flex-wrap gap-1">
-                            {m.features.map(f => (
-                              <span key={f} className="text-xs px-1 py-0.5 rounded bg-white/5 text-gray-400 border border-white/5">{f}</span>
-                            ))}
-                          </div>
-                        ) : <span className="text-gray-600">-</span>}
-                      </td>
-                      <td className="py-2.5 px-4 hidden lg:table-cell">{stateBadge[m.state]}</td>
-                      <td className="py-2.5 px-4 text-right space-x-2 whitespace-nowrap">
-                        {m.state === 'active' && (
-                          <>
-                            <button onClick={async () => { await doApi('/v1/node/models/unload', { model: m.name }); refreshAll() }}
-                              className="text-xs text-gray-500 hover:text-ledger transition-colors">unload</button>
-                            {m.hasFile && (
-                              <button onClick={async () => {
-                                if (confirm(`Delete ${m.filename}? This will unload and remove the file.`)) {
-                                  await doApi('/v1/node/models/delete-file', { filename: m.filename }); refreshAll()
-                                }
-                              }} className="text-xs text-gray-600 hover:text-compute transition-colors">delete</button>
-                            )}
-                          </>
-                        )}
-                        {m.state === 'on-disk' && (
-                          <>
-                            <button onClick={async () => {
-                              await doApi('/v1/node/models/load', { model_path: m.filePath, name: m.name, backend: 'llama.cpp', ctx_len: m.ctx || 4096 })
-                              refreshAll()
-                            }} className="text-xs text-spore hover:text-spore/80 transition-colors">load</button>
-                            <button onClick={async () => {
-                              if (confirm(`Delete ${m.filename}?`)) { await doApi('/v1/node/models/delete-file', { filename: m.filename }); refreshAll() }
-                            }} className="text-xs text-gray-600 hover:text-compute transition-colors">delete</button>
-                          </>
-                        )}
-                        {m.state === 'disabled' && (
-                          <>
-                            <button onClick={async () => { await doApi('/v1/node/models/reload', { model: m.name }); refreshAll() }}
-                              className="text-xs text-spore hover:text-spore/80 transition-colors">enable</button>
-                            <button onClick={async () => {
-                              if (confirm(`Remove config for ${m.name}?`)) { await doApi('/v1/node/models/remove-config', { model: m.name }); refreshAll() }
-                            }} className="text-xs text-gray-600 hover:text-compute transition-colors">remove</button>
-                          </>
-                        )}
-                        {m.state === 'loading' && (
-                          <span className="text-xs text-gray-600 font-mono">{m.elapsed ? `${m.elapsed}s` : '...'}</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              <ModelTable allModels={allModels} stateIndicator={stateIndicator} stateNameColor={stateNameColor}
+                stateBadge={stateBadge} doApi={doApi} refreshAll={refreshAll} nodeApi={nodeApi} />
             ) : (
               <div className="px-5 py-8 text-center text-sm text-gray-600">
                 No models on this node. Search HuggingFace below to get started.
@@ -1878,142 +2378,83 @@ function ModelsTab({ status, onRefresh }) {
                 </button>
               </div>
 
-              {/* Repo file picker */}
-              {repoFiles && (
-                <div className="bg-black border border-white/10 rounded-lg p-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <div>
-                      <span className="font-mono text-sm text-white">{repoFiles.repo_id}</span>
-                      <div className="flex items-center space-x-3 mt-1 text-xs text-gray-500">
-                        {repoFiles.param_b > 0 && <span>{repoFiles.param_b}B params</span>}
-                        {repoFiles.architecture && <span>{repoFiles.architecture}</span>}
-                        {repoFiles.context_length > 0 && <span>{repoFiles.context_length.toLocaleString()} ctx</span>}
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-3">
-                      {repoFiles.disk_free_gb > 0 && <span className="text-xs text-gray-600">{repoFiles.disk_free_gb}GB free</span>}
-                      <button onClick={() => setFilterCompatible(f => !f)}
-                        className={`text-xs px-2 py-0.5 rounded border transition-colors ${filterCompatible ? 'border-spore/30 text-spore bg-spore/5' : 'border-white/10 text-gray-500'}`}>
-                        {filterCompatible ? 'Compatible only' : 'Show all'}
-                      </button>
-                      <button onClick={() => setRepoFiles(null)} className="text-xs text-gray-500 hover:text-white">&times;</button>
-                    </div>
-                  </div>
-                  <div className="overflow-x-auto max-h-[250px] overflow-y-auto custom-scrollbar">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="text-xs text-gray-600 font-mono">
-                          <th className="text-left py-1 pr-3">File</th>
-                          <th className="text-left py-1 pr-3">Quant</th>
-                          <th className="text-right py-1 pr-3">Size</th>
-                          <th className="text-right py-1 pr-3">RAM est.</th>
-                          <th className="text-right py-1"></th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(repoFiles.files || []).filter(f => !filterCompatible || !f.warnings || f.warnings.length === 0).map((f, i) => {
-                          // Match download_id: sha256(repo/filename)[:16] — same as server
-                          const dlIdSrc = `${repoFiles.repo_id}/${f.filename}`
-                          // Find matching download by filename (more reliable than hash matching)
-                          const dl = Object.values(downloadStatus).find(d => d.filename === f.filename && d.repo_id === repoFiles.repo_id)
-                          const hasWarnings = f.warnings && f.warnings.length > 0
-                          const isOnDisk = localFiles.some(lf => lf.filename === f.filename)
-                          const isLoaded = models.some(m => f.filename.replace('.gguf', '') === m.name)
-
-                          return (
-                            <tr key={i} className={`border-t border-white/5 hover:bg-white/[0.02] ${hasWarnings && !isOnDisk ? 'opacity-60' : ''}`}>
-                              <td className="py-1.5 pr-3 font-mono text-gray-300 text-xs truncate max-w-[200px]" title={f.filename}>{f.filename}</td>
-                              <td className="py-1.5 pr-3">
-                                <span className={`text-xs px-1.5 py-0.5 rounded font-mono ${
-                                  f.quant?.startsWith('Q4') ? 'bg-spore/10 text-spore' :
-                                  f.quant?.startsWith('Q5') || f.quant?.startsWith('Q6') ? 'bg-relay/10 text-relay' :
-                                  f.quant?.startsWith('Q8') || f.quant === 'F16' ? 'bg-poison/10 text-poison' :
-                                  'bg-white/5 text-gray-500'
-                                }`}>{f.quant || '?'}</span>
-                              </td>
-                              <td className="py-1.5 pr-3 text-right text-xs text-gray-400">{f.size_gb}GB</td>
-                              <td className="py-1.5 pr-3 text-right text-xs text-gray-500">{f.est_ram_gb ? `~${f.est_ram_gb}GB` : '?'}</td>
-                              <td className="py-1.5 text-right min-w-[140px]">
-                                {hasWarnings && !isOnDisk && (
-                                  <span className="text-compute text-xs mr-2" title={f.warnings.join('; ')}>&#9888;</span>
-                                )}
-                                {dl && dl.status === 'downloading' ? (
-                                  <div className="inline-flex flex-col items-end gap-0.5">
-                                    <div className="w-24 bg-void rounded-full h-1.5 overflow-hidden border border-white/5">
-                                      <div className="h-full bg-ledger transition-all" style={{ width: `${dl.progress || 0}%` }} />
-                                    </div>
-                                    <span className="text-xs font-mono text-ledger">
-                                      {dl.progress?.toFixed(0)}%
-                                      {dl.speed_mbps > 0 && <span className="text-gray-500 ml-1">{dl.speed_mbps}MB/s</span>}
-                                      {dl.eta_seconds > 0 && <span className="text-gray-600 ml-1">{dl.eta_seconds > 60 ? `${Math.floor(dl.eta_seconds/60)}m` : `${dl.eta_seconds}s`}</span>}
-                                    </span>
-                                  </div>
-                                ) : dl && dl.status === 'complete' || isOnDisk ? (
-                                  <div className="inline-flex items-center space-x-2">
-                                    {isLoaded && <span className="text-xs text-spore">loaded</span>}
-                                    {!isLoaded && <span className="text-xs text-gray-500">on disk</span>}
-                                    <button onClick={async () => {
-                                      if (confirm(`Delete ${f.filename}?`)) {
-                                        await doApi('/v1/node/models/delete-file', { filename: f.filename })
-                                        const doFetch = isRemote && selectedDevice?.addr ? (p) => remoteApi(selectedDevice.addr, p) : api
-                                        doFetch('/v1/node/models/local').then(d => setLocalFiles(d.files || [])).catch(() => {})
-                                        onRefresh()
-                                      }
-                                    }} className="text-xs text-gray-600 hover:text-compute" title="Delete file">&#128465;</button>
-                                  </div>
-                                ) : dl && dl.status === 'failed' ? (
-                                  <span className="text-xs text-compute font-mono">failed</span>
-                                ) : (
-                                  <button onClick={() => handleDownload(repoFiles.repo_id, f.filename, f)}
-                                    className={`text-xs ${hasWarnings ? 'text-ledger hover:text-ledger/80' : 'text-spore hover:text-spore/80'}`}>
-                                    {hasWarnings ? 'Download anyway' : 'Download'}
-                                  </button>
-                                )}
-                              </td>
-                            </tr>
-                          )
-                        })}
-                      </tbody>
-                    </table>
-                    {filterCompatible && (repoFiles.files || []).some(f => f.warnings?.length > 0) && (
-                      <div className="text-xs text-gray-600 mt-2 px-1">
-                        {(repoFiles.files || []).filter(f => f.warnings?.length > 0).length} variant(s) hidden (exceed node resources).
-                        <button onClick={() => setFilterCompatible(false)} className="text-gray-400 hover:text-white ml-1 underline">Show all</button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Search results */}
-              {searchResults.length > 0 && !repoFiles && (() => {
+              {/* Search results — list view with inline expand */}
+              {searchResults.length > 0 && (() => {
                 const isCompat = (m) => !m.est_min_ram_gb || !nodeResources.ram_gb || m.est_min_ram_gb <= nodeResources.ram_gb
                 const filtered = filterCompatible ? searchResults.filter(isCompat) : searchResults
                 const hiddenCount = searchResults.length - filtered.length
+                // Derive capability tags from model name/tags
+                const capBadges = (m) => {
+                  const caps = []
+                  const name = (m.repo_id || '').toLowerCase()
+                  const tags = (m.tags || []).map(t => t.toLowerCase())
+                  if (name.includes('code') || name.includes('coder') || tags.includes('code')) caps.push({ label: 'code', color: 'text-relay bg-relay/10' })
+                  if (name.includes('instruct') || name.includes('chat') || tags.includes('conversational')) caps.push({ label: 'chat', color: 'text-spore bg-spore/10' })
+                  if (name.includes('vision') || name.includes('vl') || name.includes('llava')) caps.push({ label: 'vision', color: 'text-poison bg-poison/10' })
+                  if (name.includes('reason') || name.includes('think') || name.includes('r1') || name.includes('qwq')) caps.push({ label: 'reasoning', color: 'text-ledger bg-ledger/10' })
+                  if (name.includes('embed')) caps.push({ label: 'embedding', color: 'text-gray-400 bg-white/5' })
+                  if (caps.length === 0) caps.push({ label: 'general', color: 'text-gray-500 bg-white/5' })
+                  return caps
+                }
                 return (
                   <>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="text-gray-600 font-mono uppercase">
+                          <th className="text-left py-1 pr-1 w-5"></th>
+                          <th className="text-left py-1 pr-2">Model</th>
+                          <th className="text-left py-1 pr-2 hidden sm:table-cell">Type</th>
+                          <th className="text-right py-1 pr-2 hidden sm:table-cell">Params</th>
+                          <th className="text-left py-1 pr-2 hidden md:table-cell">Arch</th>
+                          <th className="text-right py-1 pr-2 hidden md:table-cell">Context</th>
+                          <th className="text-right py-1 pr-2">Min size</th>
+                          <th className="text-right py-1 pr-2 hidden lg:table-cell">Downloads</th>
+                          <th className="text-right py-1 w-5"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
                       {filtered.map((m, i) => {
                         const compat = isCompat(m)
+                        const isExpanded = repoFiles?.repo_id === m.repo_id
                         return (
-                          <button key={i} onClick={() => handleBrowseRepo(m.repo_id)}
-                            className={`text-left bg-black border rounded-lg p-3 hover:border-spore/30 transition-colors ${compat ? 'border-white/10' : 'border-white/5 opacity-50'}`}>
-                            <div className="flex items-center justify-between">
-                              <div className="font-mono text-sm text-white truncate">{m.repo_id}</div>
-                              {!compat && <span className="text-compute text-xs ml-1" title="May exceed node resources">&#9888;</span>}
-                            </div>
-                            <div className="flex items-center flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-xs text-gray-500">
-                              {m.param_b > 0 && <span className="text-gray-300 font-medium">{m.param_b}B</span>}
-                              {m.architecture && <span>{m.architecture}</span>}
-                              {m.context_length > 0 && <span>{(m.context_length / 1000).toFixed(0)}k ctx</span>}
-                              {m.est_min_size_gb > 0 && <span>~{m.est_min_size_gb}GB</span>}
-                              <span>&darr;{m.downloads?.toLocaleString()}</span>
-                              {m.license && <span>{m.license}</span>}
-                            </div>
-                          </button>
+                          <React.Fragment key={i}>
+                            <tr onClick={() => isExpanded ? setRepoFiles(null) : handleBrowseRepo(m.repo_id)}
+                              className={`cursor-pointer border-t border-white/5 transition-colors ${
+                                isExpanded ? 'bg-white/[0.05]' :
+                                compat ? 'hover:bg-white/[0.03]' : 'opacity-50'
+                              }`}>
+                              <td className="py-2 pr-1">
+                                <ChevronRight size={12} className={`text-gray-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                              </td>
+                              <td className="py-2 pr-2">
+                                <div className="font-mono text-sm text-white truncate max-w-[250px]">{m.repo_id}</div>
+                              </td>
+                              <td className="py-2 pr-2 hidden sm:table-cell">
+                                <div className="flex gap-1">
+                                  {capBadges(m).map((c, j) => (
+                                    <span key={j} className={`px-1 py-0 rounded ${c.color}`}>{c.label}</span>
+                                  ))}
+                                </div>
+                              </td>
+                              <td className="py-2 pr-2 text-right text-gray-300 font-mono hidden sm:table-cell">{m.param_b > 0 ? `${m.param_b}B` : '-'}</td>
+                              <td className="py-2 pr-2 text-gray-500 hidden md:table-cell">{m.architecture || '-'}</td>
+                              <td className="py-2 pr-2 text-right text-gray-500 hidden md:table-cell">{m.context_length > 0 ? `${(m.context_length / 1000).toFixed(0)}k` : '-'}</td>
+                              <td className="py-2 pr-2 text-right text-gray-400">{m.est_min_size_gb > 0 ? `~${m.est_min_size_gb}GB` : '-'}</td>
+                              <td className="py-2 pr-2 text-right text-gray-600 hidden lg:table-cell">{m.downloads?.toLocaleString()}</td>
+                              <td className="py-2 text-right">{!compat && <AlertTriangle size={12} className="text-compute" />}</td>
+                            </tr>
+                            {isExpanded && repoFiles && (
+                              <tr><td colSpan={9} className="p-0">
+                                <VariantTable repoFiles={repoFiles} filterCompatible={filterCompatible}
+                                  downloadStatus={downloadStatus} localFiles={localFiles} models={models}
+                                  onDownload={(f) => handleDownload(repoFiles.repo_id, f.filename, f)} />
+                              </td></tr>
+                            )}
+                          </React.Fragment>
                         )
                       })}
-                    </div>
+                      </tbody>
+                    </table>
                     {hiddenCount > 0 && (
                       <div className="text-xs text-gray-600 mt-2">
                         {hiddenCount} model(s) hidden (too large for {nodeResources.ram_gb}GB RAM).
@@ -2028,33 +2469,60 @@ function ModelsTab({ status, onRefresh }) {
                 <div className="text-center text-sm text-gray-600 py-4">No GGUF models found for &ldquo;{searchQuery}&rdquo;</div>
               )}
 
-              {/* Suggested models — show when no search active */}
-              {!hasSearched && !repoFiles && suggestions && suggestions.length > 0 && (
+              {/* Suggested models — list view with inline expand */}
+              {!hasSearched && suggestions && suggestions.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <h3 className="text-xs text-gray-500 font-mono uppercase tracking-wider">Suggested for this node</h3>
-                    {nodeResources.ram_gb > 0 && <span className="text-xs text-gray-600">{nodeResources.ram_gb}GB RAM · {nodeResources.disk_free_gb}GB disk free</span>}
+                    {nodeResources.ram_gb > 0 && <span className="text-xs text-gray-600">{nodeResources.ram_gb}GB RAM &middot; {nodeResources.disk_free_gb}GB disk free</span>}
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                    {suggestions.filter(s => !filterCompatible || s.compatible).map((s, i) => (
-                      <button key={i} onClick={() => handleBrowseRepo(s.repo_id)}
-                        className={`text-left bg-black border rounded-lg p-3 hover:border-spore/30 transition-colors ${s.compatible ? 'border-spore/20' : 'border-white/5 opacity-50'}`}>
-                        <div className="flex items-center justify-between">
-                          <span className="font-mono text-sm text-white truncate">{s.repo_id.split('/').pop()}</span>
-                          {s.compatible
-                            ? <span className="text-spore text-xs">&#10003;</span>
-                            : <span className="text-compute text-xs">&#9888;</span>
-                          }
-                        </div>
-                        <div className="text-xs text-gray-500 mt-1">{s.description}</div>
-                        <div className="flex items-center space-x-3 mt-1 text-xs text-gray-600">
-                          <span>{s.param_b}B</span>
-                          <span>~{s.est_size_gb}GB (Q4)</span>
-                          <span>needs {s.min_ram_gb}GB+ RAM</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="text-gray-600 font-mono uppercase">
+                        <th className="text-left py-1 pr-1 w-5"></th>
+                        <th className="text-left py-1 pr-2">Model</th>
+                        <th className="text-right py-1 pr-2">Params</th>
+                        <th className="text-right py-1 pr-2">Est. size</th>
+                        <th className="text-right py-1 pr-2 hidden sm:table-cell">Min RAM</th>
+                        <th className="text-right py-1 w-5"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                    {suggestions.filter(s => !filterCompatible || s.compatible).map((s, i) => {
+                      const isExpanded = repoFiles?.repo_id === s.repo_id
+                      return (
+                        <React.Fragment key={i}>
+                          <tr onClick={() => isExpanded ? setRepoFiles(null) : handleBrowseRepo(s.repo_id)}
+                            className={`cursor-pointer border-t border-white/5 transition-colors ${
+                              isExpanded ? 'bg-white/[0.05]' :
+                              s.compatible ? 'hover:bg-white/[0.03]' : 'opacity-50'
+                            }`}>
+                            <td className="py-2 pr-1">
+                              <ChevronRight size={12} className={`text-gray-600 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                            </td>
+                            <td className="py-2 pr-2">
+                              <div className="font-mono text-sm text-white">{s.repo_id.split('/').pop()}</div>
+                              <div className="text-gray-500 truncate max-w-[250px]">{s.description}</div>
+                            </td>
+                            <td className="py-2 pr-2 text-right text-gray-300 font-mono">{s.param_b}B</td>
+                            <td className="py-2 pr-2 text-right text-gray-400">~{s.est_size_gb}GB</td>
+                            <td className="py-2 pr-2 text-right text-gray-600 hidden sm:table-cell">{s.min_ram_gb}GB+</td>
+                            <td className="py-2 text-right">
+                              {s.compatible ? <CheckCircle size={12} className="text-spore" /> : <AlertTriangle size={12} className="text-compute" />}
+                            </td>
+                          </tr>
+                          {isExpanded && repoFiles && (
+                            <tr><td colSpan={6} className="p-0">
+                              <VariantTable repoFiles={repoFiles} filterCompatible={filterCompatible}
+                                downloadStatus={downloadStatus} localFiles={localFiles} models={models}
+                                onDownload={(f) => handleDownload(repoFiles.repo_id, f.filename, f)} />
+                            </td></tr>
+                          )}
+                        </React.Fragment>
+                      )
+                    })}
+                    </tbody>
+                  </table>
                   {filterCompatible && suggestions.some(s => !s.compatible) && (
                     <div className="text-xs text-gray-600 mt-2">
                       {suggestions.filter(s => !s.compatible).length} model(s) hidden.
@@ -2108,9 +2576,18 @@ function ModelsTab({ status, onRefresh }) {
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">API Key</label>
-                  <input type={showKey ? 'text' : 'password'} value={form.api_key} onChange={e => setForm(f => ({...f, api_key: e.target.value}))}
-                    placeholder="sk-..."
-                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                  <div className="flex space-x-1">
+                    <input type={showKey ? 'text' : 'password'} value={form.api_key} onChange={e => setForm(f => ({...f, api_key: e.target.value}))}
+                      placeholder={storedSecrets.length ? 'sk-... or select secret →' : 'sk-...'}
+                      className="flex-1 bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                    {storedSecrets.length > 0 && (
+                      <select value="" onChange={e => { if (e.target.value) setForm(f => ({...f, api_key: `secret:${e.target.value}`})) }}
+                        className="bg-black border border-white/10 rounded-lg px-2 py-2 text-sm font-mono text-gray-400 focus:outline-none cursor-pointer">
+                        <option value="">secret</option>
+                        {storedSecrets.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <label className="text-xs text-gray-500 block mb-1">Upstream model</label>
@@ -2455,6 +2932,241 @@ function LogsTab({ logs }) {
   )
 }
 
+// ── Settings Tab ──
+
+function SettingsTab() {
+  const [config, setConfig] = useState(null)
+  const [secrets, setSecrets] = useState([])
+  const [newSecret, setNewSecret] = useState({ name: '', value: '' })
+  const [showValue, setShowValue] = useState(false)
+  const [result, setResult] = useState(null)
+
+  useEffect(() => {
+    api('/v1/node/debug/config').then(setConfig).catch(() => {})
+    api('/v1/node/settings/secrets').then(d => setSecrets(d.secrets || [])).catch(() => setSecrets([]))
+  }, [])
+
+  const addSecret = async () => {
+    if (!newSecret.name || !newSecret.value) return
+    try {
+      await api('/v1/node/settings/secrets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newSecret.name, value: newSecret.value }),
+      })
+      setSecrets(s => [...s.filter(n => n !== newSecret.name), newSecret.name])
+      setNewSecret({ name: '', value: '' })
+      setResult({ success: `Secret '${newSecret.name}' stored` })
+      setTimeout(() => setResult(null), 3000)
+    } catch (e) {
+      setResult({ error: e.message })
+    }
+  }
+
+  const removeSecret = async (name) => {
+    try {
+      await api('/v1/node/settings/secrets', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      setSecrets(s => s.filter(n => n !== name))
+    } catch {}
+  }
+
+  return (
+    <div className="space-y-5">
+      {/* Secrets Management */}
+      <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+        <div className="flex items-center space-x-2 mb-4">
+          <Lock size={16} className="text-poison" />
+          <h3 className="text-white font-medium text-sm">Encrypted Secrets</h3>
+          <span className="text-xs text-gray-600">API keys encrypted at rest with account key</span>
+        </div>
+
+        {/* Existing secrets */}
+        {secrets.length > 0 && (
+          <div className="space-y-1.5 mb-4">
+            {secrets.map(name => (
+              <div key={name} className="flex items-center justify-between bg-black/40 border border-white/5 rounded-lg px-3 py-2">
+                <div className="flex items-center space-x-2">
+                  <Key size={12} className="text-ledger" />
+                  <span className="font-mono text-sm text-white">{name}</span>
+                  <button onClick={() => { navigator.clipboard.writeText(`secret:${name}`) }}
+                    title="Copy secret reference"
+                    className="text-gray-600 hover:text-gray-400">
+                    <Copy size={11} />
+                  </button>
+                </div>
+                <div className="flex items-center space-x-2">
+                  <span className="text-xs text-gray-600 font-mono">secret:{name}</span>
+                  <button onClick={() => removeSecret(name)} className="text-gray-600 hover:text-compute">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Add secret */}
+        <div className="flex items-end space-x-2">
+          <div className="flex-1">
+            <label className="text-xs text-gray-500 block mb-1">Name</label>
+            <input value={newSecret.name} onChange={e => setNewSecret(s => ({...s, name: e.target.value}))}
+              placeholder="openrouter"
+              className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+          </div>
+          <div className="flex-1">
+            <label className="text-xs text-gray-500 block mb-1">Value</label>
+            <input type={showValue ? 'text' : 'password'} value={newSecret.value}
+              onChange={e => setNewSecret(s => ({...s, value: e.target.value}))}
+              placeholder="sk-or-..."
+              onKeyDown={e => e.key === 'Enter' && addSecret()}
+              className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+          </div>
+          <button onClick={() => setShowValue(!showValue)} className="text-gray-500 hover:text-gray-300 pb-2">
+            {showValue ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+          <button onClick={addSecret} disabled={!newSecret.name || !newSecret.value}
+            className="bg-white/10 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-white/20 disabled:opacity-40 whitespace-nowrap">
+            Store Secret
+          </button>
+        </div>
+
+        <p className="text-xs text-gray-600 mt-3">
+          Use in model configs as <code className="text-gray-400">secret:name</code> instead of raw API keys.
+        </p>
+
+        {result && (
+          <div className={`flex items-center space-x-2 text-sm p-2 rounded-lg mt-2 ${result.error ? 'bg-compute/10 text-compute' : 'bg-spore/10 text-spore'}`}>
+            {result.error ? <AlertCircle size={14} /> : <Check size={14} />}
+            <span>{result.error || result.success}</span>
+          </div>
+        )}
+      </div>
+
+      {/* Node Configuration */}
+      <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+        <div className="flex items-center space-x-2 mb-4">
+          <Settings size={16} className="text-relay" />
+          <h3 className="text-white font-medium text-sm">Node Configuration</h3>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+          <div className="space-y-2.5">
+            <div className="flex justify-between">
+              <span className="text-gray-500">API Key</span>
+              <span className={`font-mono ${config?.api_key_set ? 'text-spore' : 'text-gray-600'}`}>
+                {config?.api_key_set ? 'Configured' : 'Not set'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Bootstrap Peers</span>
+              <span className="font-mono text-gray-300">{config?.bootstrap_peers || 'None'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Bootstrap Active</span>
+              <span className={`font-mono ${config?.announce_task_alive ? 'text-spore' : 'text-gray-600'}`}>
+                {config?.announce_task_alive ? 'Announcing' : 'Inactive'}
+              </span>
+            </div>
+          </div>
+          <div className="space-y-2.5">
+            <div className="flex justify-between">
+              <span className="text-gray-500">HuggingFace Token</span>
+              <span className={`font-mono ${config?.hf_token_set ? 'text-spore' : 'text-ledger'}`}>
+                {config?.hf_token_set ? 'Configured' : 'Not set (rate limited)'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Database</span>
+              <span className="font-mono text-gray-300">{config?.db_backend || 'SQLite'}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-500">Log Level</span>
+              <span className="font-mono text-gray-300">{config?.log_level || 'INFO'}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Telemetry */}
+      <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2">
+            <Activity size={16} className="text-spore" />
+            <h3 className="text-white font-medium text-sm">Telemetry</h3>
+          </div>
+          <button onClick={async () => {
+            const next = !config?.telemetry
+            try {
+              const resp = await api('/v1/node/settings/telemetry', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: next }),
+              })
+              if (!resp.error) {
+                setConfig(c => ({...c, telemetry: next}))
+              } else {
+                setResult({ error: resp.error })
+              }
+            } catch (e) {
+              setResult({ error: `Toggle failed: ${e.message}` })
+            }
+          }}
+            className={`relative w-10 h-5 rounded-full transition-colors ${config?.telemetry ? 'bg-spore' : 'bg-white/10'}`}>
+            <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${config?.telemetry ? 'translate-x-5' : 'translate-x-0.5'}`} />
+          </button>
+        </div>
+        <p className="text-xs text-gray-500 mt-2">
+          Share anonymous usage stats (request counts, TPS, model names, uptime) with the network bootstrap.
+          No prompts, IPs, or user data. Helps the public stats page show real network-wide activity.
+        </p>
+        <p className="text-xs text-gray-600 mt-1">
+          Status: <span className={config?.telemetry ? 'text-spore' : 'text-gray-500'}>{config?.telemetry ? 'Enabled' : 'Disabled'}</span>
+          {config?.telemetry && ' — stats included in bootstrap announce every 60s'}
+        </p>
+      </div>
+
+      {/* Integration Links */}
+      <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+        <div className="flex items-center space-x-2 mb-4">
+          <ExternalLink size={16} className="text-spore" />
+          <h3 className="text-white font-medium text-sm">Integrations</h3>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+          <a href="/metrics" target="_blank" rel="noopener"
+            className="flex items-center space-x-2 bg-black/40 border border-white/5 rounded-lg px-4 py-3 hover:border-white/20 transition-colors">
+            <Gauge size={14} className="text-relay" />
+            <div>
+              <div className="text-white">Prometheus Metrics</div>
+              <div className="text-xs text-gray-600">/metrics endpoint</div>
+            </div>
+          </a>
+          <a href="/health" target="_blank" rel="noopener"
+            className="flex items-center space-x-2 bg-black/40 border border-white/5 rounded-lg px-4 py-3 hover:border-white/20 transition-colors">
+            <Heart size={14} className="text-spore" />
+            <div>
+              <div className="text-white">Health Check</div>
+              <div className="text-xs text-gray-600">/health endpoint</div>
+            </div>
+          </a>
+          <a href="/docs" target="_blank" rel="noopener"
+            className="flex items-center space-x-2 bg-black/40 border border-white/5 rounded-lg px-4 py-3 hover:border-white/20 transition-colors">
+            <Globe size={14} className="text-ledger" />
+            <div>
+              <div className="text-white">API Docs</div>
+              <div className="text-xs text-gray-600">OpenAPI / Swagger</div>
+            </div>
+          </a>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 // ── Auth Gate ──
 
 function AuthGate({ onAuth }) {
@@ -2636,7 +3348,7 @@ export default function App() {
 
   return (
     <NodeRegistryContext.Provider value={nodeRegistry}>
-      <div className="min-h-screen bg-void text-console font-sans relative">
+      <div className="min-h-screen text-console font-sans relative">
         <NetworkCanvas
           selfNode={status}
           peers={status?.peers || []}
@@ -2647,11 +3359,8 @@ export default function App() {
         <header className="border-b border-white/10 bg-void/80 backdrop-blur-md sticky top-0 z-50 relative">
           <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
             <div className="flex items-center space-x-3">
-              <pre className="text-[4px] leading-none text-compute drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]">{ASCII_SHROOM}</pre>
-              <span className="font-mono text-xl font-bold tracking-tighter text-white">
-                mycellm<span className="text-spore">.</span>
-              </span>
-              <div className="h-4 w-px bg-white/20 mx-2" />
+              <img src="/brand/mycellm-h-R.svg" alt="mycellm" className="h-6" />
+              <div className="h-4 w-px bg-white/20 mx-1" />
               <span className="font-mono text-xs bg-white/10 text-gray-300 px-2 py-1 rounded">{nodeName}</span>
               {peerId && <span className="font-mono text-xs text-gray-600 hidden md:inline">{peerId.slice(0, 12)}...</span>}
             </div>
@@ -2701,6 +3410,7 @@ export default function App() {
           {tab === 'chat' && <ChatTab />}
           {tab === 'credits' && <CreditsTab credits={credits} />}
           {tab === 'logs' && <LogsTab logs={logs} />}
+          {tab === 'settings' && <SettingsTab />}
         </main>
       </div>
     </NodeRegistryContext.Provider>
