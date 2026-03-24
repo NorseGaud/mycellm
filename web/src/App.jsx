@@ -769,10 +769,12 @@ function Sparkline({ data, color = '#22C55E', height = 32, width = 120 }) {
 }
 
 function ActivityFeed({ events }) {
-  const endRef = useRef(null)
+  const containerRef = useRef(null)
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Scroll within the feed container only, not the page
+    const el = containerRef.current
+    if (el) el.scrollTop = el.scrollHeight
   }, [events])
 
   const typeColors = {
@@ -839,7 +841,7 @@ function ActivityFeed({ events }) {
   }
 
   return (
-    <div className="space-y-1 max-h-[250px] overflow-y-auto custom-scrollbar text-xs font-mono">
+    <div ref={containerRef} className="space-y-1 max-h-[250px] overflow-y-auto custom-scrollbar text-xs font-mono">
       {events.length === 0 && (
         <div className="text-gray-600 text-center py-4">No activity yet. Send an inference request to see events.</div>
       )}
@@ -854,7 +856,6 @@ function ActivityFeed({ events }) {
           </span>
         </div>
       ))}
-      <div ref={endRef} />
     </div>
   )
 }
@@ -1183,6 +1184,9 @@ function OverviewTab({ status, credits, fleetNodes }) {
           <div className="text-center">
             <div className="text-xl font-mono text-ledger">{credits.balance?.toFixed(1)}</div>
             <div className="text-gray-500">credits</div>
+            <div className={`text-[10px] mt-0.5 ${credits.balance >= 50 ? 'text-ledger' : credits.balance >= 10 ? 'text-spore' : 'text-gray-600'}`}>
+              {credits.balance >= 50 ? 'power' : credits.balance >= 10 ? 'contributor' : 'free'}
+            </div>
           </div>
         </div>
       </div>
@@ -1250,27 +1254,30 @@ OPENAI_MODEL=${models[0]?.name || 'auto'}`}</pre>
 
       {/* Aggregate Fleet Banner (root mode) */}
       {fleetHardware && fleetHardware.aggregate && (
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
-            <div className="text-xs text-gray-500 font-mono">NODES</div>
-            <div className="text-2xl font-mono text-white mt-1">{fleetHardware.aggregate.online_nodes}/{fleetHardware.aggregate.total_nodes}</div>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+          <div className="border border-white/10 bg-[#111] rounded-xl p-3 sm:p-4 text-center">
+            <div className="text-[10px] sm:text-xs text-gray-500 font-mono">NODES</div>
+            <div className="text-xl sm:text-2xl font-mono text-white mt-1">{fleetHardware.aggregate.online_nodes}/{fleetHardware.aggregate.total_nodes}</div>
           </div>
-          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
-            <div className="text-xs text-gray-500 font-mono">AGGREGATE T/s</div>
-            <div className="text-2xl font-mono text-compute mt-1">{fleetHardware.aggregate.total_tps}</div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-3 sm:p-4 text-center">
+            <div className="text-[10px] sm:text-xs text-gray-500 font-mono">THROUGHPUT</div>
+            <div className="text-xl sm:text-2xl font-mono text-compute mt-1">{fleetHardware.aggregate.total_tps} <span className="text-xs text-gray-500">T/s</span></div>
           </div>
-          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
-            <div className="text-xs text-gray-500 font-mono">COMPUTE</div>
-            <div className="text-2xl font-mono text-relay mt-1">{fleetHardware.aggregate.total_vram_gb}GB</div>
-            <div className="text-xs text-gray-600">VRAM</div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-3 sm:p-4 text-center">
+            <div className="text-[10px] sm:text-xs text-gray-500 font-mono">REQUESTS</div>
+            <div className="text-xl sm:text-2xl font-mono text-ledger mt-1">{fleetHardware.aggregate.total_requests || stats.total_requests || 0}</div>
           </div>
-          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
-            <div className="text-xs text-gray-500 font-mono">RAM</div>
-            <div className="text-2xl font-mono text-poison mt-1">{fleetHardware.aggregate.total_ram_gb}GB</div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-3 sm:p-4 text-center">
+            <div className="text-[10px] sm:text-xs text-gray-500 font-mono">TOKENS</div>
+            <div className="text-xl sm:text-2xl font-mono text-poison mt-1">{fleetHardware.aggregate.total_tokens || stats.total_tokens || 0}</div>
           </div>
-          <div className="border border-white/10 bg-[#111] rounded-xl p-4 text-center">
-            <div className="text-xs text-gray-500 font-mono">MODELS</div>
-            <div className="text-2xl font-mono text-spore mt-1">{fleetHardware.aggregate.total_models}</div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-3 sm:p-4 text-center">
+            <div className="text-[10px] sm:text-xs text-gray-500 font-mono">VRAM</div>
+            <div className="text-xl sm:text-2xl font-mono text-relay mt-1">{fleetHardware.aggregate.total_vram_gb}<span className="text-xs text-gray-500">GB</span></div>
+          </div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-3 sm:p-4 text-center">
+            <div className="text-[10px] sm:text-xs text-gray-500 font-mono">MODELS</div>
+            <div className="text-xl sm:text-2xl font-mono text-spore mt-1">{fleetHardware.aggregate.total_models}</div>
           </div>
         </div>
       )}
@@ -1303,11 +1310,13 @@ OPENAI_MODEL=${models[0]?.name || 'auto'}`}</pre>
           <div className="text-xs text-gray-600">+{credits.earned?.toFixed(1) || '0'} / -{credits.spent?.toFixed(1) || '0'}</div>
         </div>
         <div className="border border-white/10 bg-[#111] rounded-xl p-4">
-          <div className="text-xs text-gray-500 font-mono">THROUGHPUT</div>
-          <div className={`text-2xl font-mono mt-1 ${stats.tps > 0 ? 'text-compute' : 'text-gray-400'}`}>
-            {stats.tps || 0} <span className="text-sm text-gray-500">T/s</span>
+          <div className="text-xs text-gray-500 font-mono">LOAD</div>
+          <div className="font-mono mt-1 flex items-baseline space-x-1.5">
+            <span className={`text-lg ${(stats.load?.req_1m || 0) > 0 ? 'text-compute' : 'text-gray-400'}`}>{stats.load?.req_1m || 0}</span>
+            <span className="text-sm text-gray-500">{stats.load?.req_5m || 0}</span>
+            <span className="text-sm text-gray-600">{stats.load?.req_15m || 0}</span>
           </div>
-          <div className="text-xs text-gray-600">{stats.avg_latency_ms ? `${stats.avg_latency_ms}ms avg` : 'idle'}</div>
+          <div className="text-[10px] text-gray-600 mt-0.5">req/min: 1m · 5m · 15m</div>
         </div>
       </div>
 
@@ -2756,6 +2765,30 @@ function ChatTab() {
       }
     }
 
+    // Sensitive content scan
+    const sensitivePatterns = [
+      { type: 'API key', re: /sk-[a-zA-Z0-9]{16,}|sk-or-v1-[a-zA-Z0-9]{10,}|gh[ps]_[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{12,}|sk-ant-[a-zA-Z0-9\-]{16,}|hf_[a-zA-Z0-9]{10,}|xox[baprs]-[a-zA-Z0-9\-]{10,}/i },
+      { type: 'Secret key', re: /(?:api[_\-]?key|secret[_\-]?key|access[_\-]?token)\s*[=:]\s*['"]?[a-zA-Z0-9_\-]{8,}/i },
+      { type: 'Private key', re: /-----BEGIN\s+(?:RSA|EC|ED25519|OPENSSH|PGP)\s+PRIVATE\s+KEY-----/i },
+      { type: 'Password', re: /(?:password|passwd|pwd)\s*[=:]\s*['"]?[^\s'"]{4,}/i },
+      { type: 'Credentials', re: /(?:my\s+password\s+is|login\s+credentials?|auth\s+token)\s+\S+/i },
+      { type: 'Credit card', re: /\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b/ },
+      { type: 'Connection string', re: /(?:postgresql|mysql|mongodb|redis):\/\/[^\s]{10,}/i },
+    ]
+    const detected = sensitivePatterns.filter(p => p.re.test(text)).map(p => p.type)
+    if (detected.length > 0) {
+      const proceed = await new Promise(resolve => {
+        const msg = `**Sensitive content detected:** ${detected.join(', ')}\n\nPrompts may be processed by remote peers. Do not send passwords, API keys, or personal data.`
+        setMessages(prev => [...prev, {
+          role: 'assistant', content: msg, isCommand: true, isSensitiveWarning: true,
+          _resolve: resolve,
+        }])
+      })
+      // Remove the warning message
+      setMessages(prev => prev.filter(m => !m.isSensitiveWarning))
+      if (!proceed) { setInput(text); return }
+    }
+
     const userMsg = { role: 'user', content: text }
     const history = [...messages.filter(m => !m.isCommand), userMsg]
     setMessages(prev => [...prev, userMsg])
@@ -2909,6 +2942,14 @@ function ChatTab() {
                 ? <div className="whitespace-pre-wrap">{m.content}</div>
                 : <div className="chat-md" dangerouslySetInnerHTML={{ __html: marked.parse(m.content || '') }} />
               }
+              {m.isSensitiveWarning && m._resolve && (
+                <div className="mt-3 flex space-x-2">
+                  <button onClick={() => m._resolve(false)}
+                    className="flex-1 bg-white/5 border border-white/10 text-gray-300 text-xs py-1.5 rounded-lg hover:bg-white/10">Cancel</button>
+                  <button onClick={() => m._resolve(true)}
+                    className="flex-1 bg-compute/20 border border-compute/30 text-compute text-xs py-1.5 rounded-lg hover:bg-compute/30">Send anyway</button>
+                </div>
+              )}
               {m.model && (
                 <div className="mt-2 pt-2 border-t border-white/5 text-xs text-gray-500 flex flex-wrap gap-x-3 gap-y-0.5">
                   <span>via {m.model}</span>
@@ -2960,15 +3001,19 @@ function ChatTab() {
 
 function CreditsTab({ credits }) {
   const [history, setHistory] = useState([])
+  const [tier, setTier] = useState(null)
 
   useEffect(() => {
-    const fetch_ = () => api('/v1/node/credits/history?limit=100')
-      .then(d => setHistory(d.transactions || []))
-      .catch(() => {})
+    const fetch_ = () => {
+      api('/v1/node/credits/history?limit=100').then(d => setHistory(d.transactions || [])).catch(() => {})
+      api('/v1/node/credits/tier').then(setTier).catch(() => {})
+    }
     fetch_()
     const iv = setInterval(fetch_, 5000)
     return () => clearInterval(iv)
   }, [])
+
+  const tierColors = { power: 'text-ledger bg-ledger/10 border-ledger/20', contributor: 'text-spore bg-spore/10 border-spore/20', free: 'text-gray-400 bg-white/5 border-white/10' }
 
   return (
     <div className="space-y-6">
@@ -2977,6 +3022,62 @@ function CreditsTab({ credits }) {
         <StatCard label="Total Earned" value={`+${credits.earned?.toFixed(2) || '0.00'}`} icon={Zap} color="text-spore" />
         <StatCard label="Total Spent" value={`-${credits.spent?.toFixed(2) || '0.00'}`} icon={BarChart3} color="text-compute" />
       </div>
+
+      {/* Credit Tier + Receipts */}
+      {tier && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+            <h3 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-3">Access Tier</h3>
+            <div className="flex items-center space-x-3 mb-2">
+              <span className={`text-sm font-medium px-2.5 py-1 rounded border ${tierColors[tier.tier] || tierColors.free}`}>
+                {tier.label}
+              </span>
+              <span className="text-xs text-gray-500">{tier.access}</span>
+            </div>
+            <div className="mt-3 text-xs text-gray-600 space-y-1">
+              <div className="flex justify-between"><span>Free (&lt;10 credits)</span><span>Tier 1 only</span></div>
+              <div className="flex justify-between"><span>Contributor (&ge;10)</span><span>Tier 1 + 2</span></div>
+              <div className="flex justify-between"><span>Power Seeder (&ge;50)</span><span>All tiers</span></div>
+            </div>
+            {/* Progress bar to next tier */}
+            {tier.tier !== 'power' && (() => {
+              const next = tier.tier === 'free' ? 10 : 50
+              const pct = Math.min(100, (tier.balance / next) * 100)
+              return (
+                <div className="mt-3">
+                  <div className="flex justify-between text-[10px] text-gray-600 mb-1">
+                    <span>{tier.balance} credits</span>
+                    <span>{next} for next tier</span>
+                  </div>
+                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                    <div className="h-full bg-spore rounded-full transition-all" style={{width: `${pct}%`}} />
+                  </div>
+                </div>
+              )
+            })()}
+          </div>
+          <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+            <h3 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-3">Receipts</h3>
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div>
+                <div className="text-xl font-mono text-white">{tier.receipts?.total || 0}</div>
+                <div className="text-xs text-gray-500">Total</div>
+              </div>
+              <div>
+                <div className="text-xl font-mono text-spore">{tier.receipts?.verified || 0}</div>
+                <div className="text-xs text-gray-500">Verified</div>
+              </div>
+              <div>
+                <div className="text-xl font-mono text-relay">{tier.receipts?.fleet || 0}</div>
+                <div className="text-xs text-gray-500">Fleet</div>
+              </div>
+            </div>
+            <p className="text-[10px] text-gray-600 mt-3">
+              Verified receipts are Ed25519-signed by seeder nodes. Fleet receipts are generated via HTTP proxy.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="border border-white/10 bg-[#111] rounded-xl p-5">
         <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4">Transaction History</h2>
@@ -3498,28 +3599,29 @@ export default function App() {
         />
         {/* Header */}
         <header className="border-b border-white/10 bg-void/80 backdrop-blur-md sticky top-0 z-50 relative">
-          <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <img src="/brand/mycellm-h-R.svg" alt="mycellm" className="h-6" />
-              <div className="h-4 w-px bg-white/20 mx-1" />
-              <span className="font-mono text-xs bg-white/10 text-gray-300 px-2 py-1 rounded">{nodeName}</span>
-              {peerId && <span className="font-mono text-xs text-gray-600 hidden md:inline">{peerId.slice(0, 12)}...</span>}
+          <div className="max-w-7xl mx-auto px-4 h-12 sm:h-14 flex items-center justify-between">
+            <div className="flex items-center space-x-2 sm:space-x-3 min-w-0">
+              <img src="/brand/mycellm-h-R.svg" alt="mycellm" className="h-5 sm:h-6 shrink-0" />
+              <div className="h-4 w-px bg-white/20 mx-1 hidden sm:block" />
+              <span className="font-mono text-xs bg-white/10 text-gray-300 px-2 py-1 rounded truncate max-w-[100px] sm:max-w-none">{nodeName}</span>
+              {peerId && <span className="font-mono text-xs text-gray-600 hidden lg:inline">{peerId.slice(0, 12)}...</span>}
             </div>
-            <div className="flex items-center space-x-5 font-mono text-sm">
-              <div className="flex items-center space-x-1.5 text-relay">
-                <Activity size={13} />
-                <span>{status?.peers?.length || 0} peers</span>
+            <div className="flex items-center space-x-3 sm:space-x-5 font-mono text-xs sm:text-sm shrink-0">
+              <div className="flex items-center space-x-1 sm:space-x-1.5 text-relay">
+                <Activity size={12} />
+                <span className="hidden sm:inline">{status?.peers?.length || 0} peers</span>
+                <span className="sm:hidden">{status?.peers?.length || 0}</span>
               </div>
-              <div className="flex items-center space-x-1.5 text-relay">
-                <Radio size={13} />
+              <div className="flex items-center space-x-1 sm:space-x-1.5 text-relay hidden sm:flex">
+                <Radio size={12} />
                 <span>{fleetCount} fleet</span>
               </div>
-              <div className="flex items-center space-x-1.5 text-ledger drop-shadow-[0_0_8px_rgba(250,204,21,0.15)]">
-                <Key size={13} />
-                <span>{credits.balance?.toFixed(2)}</span>
+              <div className="flex items-center space-x-1 sm:space-x-1.5 text-ledger">
+                <Key size={12} />
+                <span>{credits.balance?.toFixed(0)}</span>
               </div>
-              <div className={`flex items-center space-x-1.5 ${status ? 'text-spore' : 'text-gray-600'}`}>
-                <Shield size={13} />
+              <div className={`flex items-center space-x-1 ${status ? 'text-spore' : 'text-gray-600'}`}>
+                <Shield size={12} />
                 <span className="hidden sm:inline">{status ? 'Online' : 'Offline'}</span>
               </div>
             </div>
@@ -3528,16 +3630,16 @@ export default function App() {
 
         {/* Tab nav */}
         <nav className="border-b border-white/5 bg-void/60 relative z-10">
-          <div className="max-w-7xl mx-auto px-4 flex space-x-1 overflow-x-auto">
+          <div className="max-w-7xl mx-auto px-2 sm:px-4 flex space-x-0.5 sm:space-x-1 overflow-x-auto scrollbar-none">
             {TABS.map(t => (
               <button key={t.id} onClick={() => setTab(t.id)}
-                className={`flex items-center space-x-2 px-4 py-3 text-sm font-medium border-b-2 transition-all whitespace-nowrap ${
+                className={`flex items-center space-x-1.5 sm:space-x-2 px-2.5 sm:px-4 py-2.5 sm:py-3 text-xs sm:text-sm font-medium border-b-2 transition-all whitespace-nowrap ${
                   tab === t.id
                     ? 'border-spore text-white'
                     : 'border-transparent text-gray-500 hover:text-gray-300'
                 }`}>
                 <t.icon size={14} />
-                <span>{t.label}</span>
+                <span className="hidden sm:inline">{t.label}</span>
               </button>
             ))}
           </div>

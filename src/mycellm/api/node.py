@@ -72,6 +72,7 @@ async def debug_config(request: Request):
         "hf_token_set": bool(node._settings.hf_token),
         "db_backend": db_backend,
         "log_level": node._settings.log_level,
+        "no_log_inference": node._settings.no_log_inference,
         "telemetry": node._settings.telemetry,
         "announce_task_alive": node._announce_task is not None and not node._announce_task.done() if hasattr(node, '_announce_task') else False,
     }
@@ -127,6 +128,49 @@ async def node_credits(request: Request):
     """Get credit balance and history."""
     node = request.app.state.node
     return await node.get_credits()
+
+
+@router.get("/credits/tier")
+async def credit_tier(request: Request):
+    """Get the consumer's current credit tier and access level."""
+    node = request.app.state.node
+    balance = 0.0
+    if node.ledger:
+        balance = await node.ledger.balance(node.peer_id)
+
+    if balance >= 50:
+        tier = "power"
+        access = "All model tiers"
+        label = "Power Seeder"
+    elif balance >= 10:
+        tier = "contributor"
+        access = "Tier 1 + Tier 2 models"
+        label = "Contributor"
+    else:
+        tier = "free"
+        access = "Tier 1 models only"
+        label = "Free Tier"
+
+    # Receipt stats
+    receipts_received = 0
+    receipts_verified = 0
+    if node.ledger:
+        all_receipts = await node.ledger.get_receipts(node.peer_id, limit=1000)
+        receipts_received = len(all_receipts)
+        receipts_verified = sum(1 for r in all_receipts if r.get("signature") and r["signature"] != "fleet")
+
+    return {
+        "balance": round(balance, 2),
+        "tier": tier,
+        "label": label,
+        "access": access,
+        "thresholds": {"free": 0, "contributor": 10, "power": 50},
+        "receipts": {
+            "total": receipts_received,
+            "verified": receipts_verified,
+            "fleet": receipts_received - receipts_verified,
+        },
+    }
 
 
 @router.get("/credits/history")
@@ -599,7 +643,9 @@ async def fleet_hardware(request: Request):
 
     # Self
     sys_info = node.get_system_info()
+    stats = node.activity.stats() if hasattr(node, 'activity') else {}
     tps = node.activity.tps if hasattr(node, 'activity') else 0
+    load = stats.get("load", {})
     nodes.append({
         "name": node._settings.node_name,
         "peer_id": node.peer_id,
@@ -611,6 +657,9 @@ async def fleet_hardware(request: Request):
         "ram_used_pct": sys_info.get("memory", {}).get("used_pct", 0),
         "models": [m.name for m in node.inference.loaded_models],
         "tps": tps,
+        "total_requests": stats.get("total_requests", 0),
+        "total_tokens": stats.get("total_tokens", 0),
+        "load": load,
         "online": True,
         "uptime_seconds": node.uptime,
     })
@@ -625,6 +674,7 @@ async def fleet_hardware(request: Request):
         caps = entry.get("capabilities", {})
         models = caps.get("models", [])
 
+        telemetry = entry.get("telemetry", {})
         nodes.append({
             "name": entry.get("node_name", ""),
             "peer_id": entry.get("peer_id", ""),
@@ -635,9 +685,11 @@ async def fleet_hardware(request: Request):
             "ram_gb": mem.get("total_gb", 0),
             "ram_used_pct": mem.get("used_pct", 0),
             "models": [m.get("name", m) if isinstance(m, dict) else m for m in models],
-            "tps": entry.get("telemetry", {}).get("tps", 0),
+            "tps": telemetry.get("tps", 0),
+            "total_requests": telemetry.get("requests_total", 0),
+            "total_tokens": telemetry.get("tokens_total", 0),
             "online": entry.get("online", False),
-            "uptime_seconds": 0,
+            "uptime_seconds": telemetry.get("uptime_seconds", 0),
         })
 
     # Aggregate
@@ -645,6 +697,8 @@ async def fleet_hardware(request: Request):
     total_vram = sum(n["vram_gb"] for n in nodes)
     total_ram = sum(n["ram_gb"] for n in nodes)
     total_models = len(set(m for n in nodes for m in n["models"]))
+    total_requests = sum(n.get("total_requests", 0) for n in nodes)
+    total_tokens = sum(n.get("total_tokens", 0) for n in nodes)
     online_count = sum(1 for n in nodes if n["online"])
 
     return {
@@ -656,6 +710,8 @@ async def fleet_hardware(request: Request):
             "total_vram_gb": round(total_vram, 1),
             "total_ram_gb": round(total_ram, 1),
             "total_models": total_models,
+            "total_requests": total_requests,
+            "total_tokens": total_tokens,
         },
     }
 
