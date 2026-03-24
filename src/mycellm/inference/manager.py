@@ -27,6 +27,12 @@ class InferenceManager:
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._max_concurrent = max_concurrent
         self._active_count = 0
+        # Persistent configs — survives unload so models can be re-loaded
+        self._saved_configs: dict[str, dict] = {}  # name -> config dict
+        # Load status tracking
+        self._load_status: dict[str, dict] = {}  # model_name -> {status, phase, error, ...}
+        # Model paths (for llama.cpp models)
+        self._model_paths: dict[str, str] = {}  # model_name -> file path
 
     @property
     def loaded_models(self) -> list[ModelCapability]:
@@ -48,33 +54,65 @@ class InferenceManager:
         **kwargs,
     ) -> str:
         """Load a model and return its name."""
+        import time as _time
         model_name = name or (Path(model_path).stem if model_path else "remote-model")
 
         if model_name in self._backends:
             logger.info(f"Model {model_name} already loaded")
             return model_name
 
-        backend = self._create_backend(backend_type)
-        await backend.load_model(model_path, name=model_name, **kwargs)
+        self._load_status[model_name] = {
+            "model": model_name,
+            "status": "loading",
+            "phase": "initializing",
+            "backend": backend_type,
+            "started_at": _time.time(),
+            "error": None,
+        }
 
-        self._backends[model_name] = backend
-        self._model_info[model_name] = ModelCapability(
-            name=model_name,
-            quant=kwargs.get("quant", ""),
-            ctx_len=kwargs.get("ctx_len", kwargs.get("n_ctx", 4096)),
-            backend=backend_type,
-        )
-
-        logger.info(f"Model {model_name} loaded via {backend_type}")
-
-        # Auto-save config
         try:
-            from mycellm.config import get_settings
-            await self.save_model_configs(get_settings().data_dir)
-        except Exception:
-            pass  # don't block load on save failure
+            self._load_status[model_name]["phase"] = "creating backend"
+            backend = self._create_backend(backend_type)
 
-        return model_name
+            if backend_type == "llama.cpp":
+                self._load_status[model_name]["phase"] = "loading model into memory"
+                if model_path:
+                    size_gb = Path(model_path).stat().st_size / (1024**3) if Path(model_path).exists() else 0
+                    if size_gb > 0:
+                        self._load_status[model_name]["phase"] = f"loading {size_gb:.1f}GB into memory"
+            else:
+                self._load_status[model_name]["phase"] = "connecting to API"
+
+            await backend.load_model(model_path, name=model_name, **kwargs)
+
+            self._load_status[model_name]["phase"] = "registering"
+            if model_path:
+                self._model_paths[model_name] = model_path
+            self._backends[model_name] = backend
+            self._model_info[model_name] = ModelCapability(
+                name=model_name,
+                quant=kwargs.get("quant", ""),
+                ctx_len=kwargs.get("ctx_len", kwargs.get("n_ctx", 4096)),
+                backend=backend_type,
+            )
+
+            elapsed = _time.time() - self._load_status[model_name]["started_at"]
+            self._load_status[model_name].update({"status": "ready", "phase": "loaded", "elapsed": round(elapsed, 1)})
+            logger.info(f"Model {model_name} loaded via {backend_type} ({elapsed:.1f}s)")
+
+            # Auto-save config
+            try:
+                from mycellm.config import get_settings
+                await self.save_model_configs(get_settings().data_dir)
+            except Exception:
+                pass
+
+            return model_name
+
+        except Exception as e:
+            self._load_status[model_name].update({"status": "failed", "phase": "error", "error": str(e)})
+            logger.error(f"Failed to load {model_name}: {e}")
+            raise
 
     async def unload_model(self, model_name: str) -> None:
         backend = self._backends.pop(model_name, None)
@@ -82,6 +120,10 @@ class InferenceManager:
             await backend.unload_model(model_name)
             self._model_info.pop(model_name, None)
             logger.info(f"Model {model_name} unloaded")
+
+            # Mark as disabled in saved configs (don't delete — allows re-enable)
+            if model_name in self._saved_configs:
+                self._saved_configs[model_name]["enabled"] = False
 
             # Auto-save config
             try:
@@ -146,9 +188,10 @@ class InferenceManager:
                 self._active_count -= 1
 
     async def save_model_configs(self, data_dir: Path) -> None:
-        """Save current model configs to disk for persistence across restarts."""
+        """Save model configs to disk. Preserves unloaded API model configs."""
         import json
-        configs = []
+
+        # Update saved configs from currently loaded models
         for name, info in self._model_info.items():
             backend = self._backends.get(name)
             config = {
@@ -159,20 +202,23 @@ class InferenceManager:
                 "tags": getattr(info, 'tags', []),
                 "tier": getattr(info, 'tier', ''),
                 "param_count_b": getattr(info, 'param_count_b', 0.0),
+                "enabled": True,
             }
-            # Save backend-specific config
+            # Store model path for llama.cpp restore
+            if name in self._model_paths:
+                config["model_path"] = self._model_paths[name]
             from mycellm.inference.openai_compat import OpenAICompatibleBackend
             if isinstance(backend, OpenAICompatibleBackend):
                 remote = backend._models.get(name)
                 if remote:
                     config["api_base"] = remote.api_base
                     config["api_model"] = remote.api_model
-                    # Extract API key from client headers
                     auth = remote.client.headers.get("authorization", "")
                     if auth.startswith("Bearer "):
                         config["api_key"] = auth[7:]
-            configs.append(config)
+            self._saved_configs[name] = config
 
+        configs = list(self._saved_configs.values())
         config_path = data_dir / "model_configs.json"
         config_path.write_text(json.dumps(configs, indent=2))
         logger.debug(f"Saved {len(configs)} model configs to {config_path}")
@@ -190,9 +236,19 @@ class InferenceManager:
             logger.warning(f"Failed to read model configs: {e}")
             return 0
 
+        # Load all configs into saved_configs (including disabled)
+        for config in configs:
+            name = config.get("name", "")
+            if name:
+                self._saved_configs[name] = config
+
+        # Only auto-load enabled configs
         restored = 0
         for config in configs:
             name = config.get("name", "")
+            if not config.get("enabled", True):
+                logger.debug(f"Skipping disabled model '{name}'")
+                continue
             backend_type = config.get("backend", "llama.cpp")
             try:
                 if backend_type in ("openai", "openai-compatible"):
@@ -205,9 +261,21 @@ class InferenceManager:
                         api_model=config.get("api_model", ""),
                         ctx_len=config.get("ctx_len", 4096),
                     )
+                elif config.get("model_path"):
+                    model_path = config["model_path"]
+                    if Path(model_path).exists():
+                        await self.load_model(
+                            model_path,
+                            name=name,
+                            backend_type=backend_type,
+                            ctx_len=config.get("ctx_len", 4096),
+                            quant=config.get("quant", ""),
+                        )
+                    else:
+                        logger.warning(f"Model file missing for '{name}': {model_path}")
+                        continue
                 else:
-                    # For local models, we'd need the path — skip if not available
-                    logger.info(f"Skipping local model restore for '{name}' (path not stored)")
+                    logger.debug(f"Skipping local model restore for '{name}' (path not stored)")
                     continue
                 restored += 1
                 logger.info(f"Restored model '{name}' ({backend_type})")
@@ -215,6 +283,15 @@ class InferenceManager:
                 logger.warning(f"Failed to restore model '{name}': {e}")
 
         return restored
+
+    def get_saved_configs(self) -> list[dict]:
+        """Get all saved model configs (loaded + unloaded)."""
+        return list(self._saved_configs.values())
+
+    async def remove_saved_config(self, model_name: str, data_dir: Path) -> None:
+        """Permanently remove a saved config (on delete)."""
+        self._saved_configs.pop(model_name, None)
+        await self.save_model_configs(data_dir)
 
     def _create_backend(self, backend_type: str) -> InferenceBackend:
         if backend_type == "llama.cpp":

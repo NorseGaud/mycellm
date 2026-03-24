@@ -953,166 +953,167 @@ function OverviewTab({ status, credits, fleetNodes }) {
   const [connections, setConnections] = useState([])
   const [activity, setActivity] = useState({ events: [], stats: {}, sparklines: {} })
   const [liveEvents, setLiveEvents] = useState([])
+  const [federation, setFederation] = useState(null)
   const [selectedNode, setSelectedNode] = useState(null)
   const peers = status?.peers || []
   const models = status?.models || []
   const uptime = status?.uptime_seconds || 0
 
+  useEffect(() => { api('/v1/node/system').then(setSysInfo).catch(() => {}) }, [])
   useEffect(() => {
-    api('/v1/node/system').then(setSysInfo).catch(() => {})
+    const f = () => api('/v1/node/connections').then(d => setConnections(d.connections || [])).catch(() => {})
+    f(); const iv = setInterval(f, 5000); return () => clearInterval(iv)
   }, [])
-
-  // Poll connections
   useEffect(() => {
-    const fetch_ = () => api('/v1/node/connections').then(d => setConnections(d.connections || [])).catch(() => {})
-    fetch_()
-    const iv = setInterval(fetch_, 5000)
-    return () => clearInterval(iv)
+    const f = () => api('/v1/node/activity?limit=100').then(setActivity).catch(() => {})
+    f(); const iv = setInterval(f, 3000); return () => clearInterval(iv)
   }, [])
-
-  // Poll activity
-  useEffect(() => {
-    const fetch_ = () => api('/v1/node/activity?limit=100').then(setActivity).catch(() => {})
-    fetch_()
-    const iv = setInterval(fetch_, 3000)
-    return () => clearInterval(iv)
-  }, [])
-
-  // SSE activity stream
+  useEffect(() => { api('/v1/node/federation').then(setFederation).catch(() => {}) }, [])
   useEffect(() => {
     const es = new EventSource('/v1/node/activity/stream')
-    es.onmessage = (event) => {
-      try {
-        const e = JSON.parse(event.data)
-        setLiveEvents(prev => {
-          const next = [...prev, e]
-          return next.length > 200 ? next.slice(-200) : next
-        })
-      } catch {}
-    }
+    es.onmessage = (e) => { try { setLiveEvents(p => [...p.slice(-199), JSON.parse(e.data)]) } catch {} }
     return () => es.close()
   }, [])
 
   const allEvents = [...(activity.events || []), ...liveEvents]
   const stats = activity.stats || {}
   const sparklines = activity.sparklines || {}
-  const routableConns = connections.filter(c => c.state === 'routable')
-  const networkModels = new Set()
-  for (const p of peers) {
-    for (const m of (p.models || [])) networkModels.add(m)
-  }
+  const approvedFleet = (fleetNodes || []).filter(n => n.status === 'approved')
+
+  // Build node list for fleet grid
+  const fleetGrid = [
+    {
+      id: 'self', name: status?.node_name || 'This node', role: status?.role || 'bootstrap',
+      status: 'online', models: models, type: 'self',
+      system: sysInfo, modelCount: models.length,
+    },
+    ...peers.map(p => ({
+      id: p.peer_id, name: (p.peer_id || '').slice(0, 12) + '...', role: p.role,
+      status: p.status, models: p.models || [], type: 'quic', modelCount: (p.models || []).length,
+    })),
+    ...approvedFleet.map(f => ({
+      id: f.peer_id || f.node_name, name: f.node_name || (f.peer_id || '').slice(0, 12),
+      role: f.capabilities?.role || 'seeder', status: 'fleet', type: 'fleet',
+      models: (f.capabilities?.models || []).map(m => m.name || m),
+      modelCount: (f.capabilities?.models || []).length, system: f.system,
+    })),
+  ]
+
+  const roleIcons = { bootstrap: '\u{1F451}', seeder: '\u{1F5A5}\uFE0F', consumer: '\u{1F4BB}', relay: '\u{1F500}' }
+  const statusDots = { online: 'bg-spore', routable: 'bg-spore', fleet: 'bg-ledger', disconnected: 'bg-compute' }
 
   return (
-    <div className="space-y-6">
-      {/* Top stat cards with sparklines */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-        <StatCard label="Uptime" value={formatUptime(uptime)} icon={Clock} color="text-gray-300" />
-        <div className="border p-5 rounded-xl border-white/10 bg-[#111]">
-          <h3 className="font-mono text-xs text-gray-500 mb-1">Requests</h3>
-          <div className="flex items-end justify-between">
-            <div>
-              <span className="text-2xl font-mono text-compute">{stats.total_requests || 0}</span>
-              <div className="text-xs text-gray-500 mt-0.5">{stats.requests_per_min || 0}/min</div>
+    <div className="space-y-5">
+      {/* Network Identity */}
+      <div className="flex items-center justify-between bg-[#111] border border-white/10 rounded-xl p-4">
+        <div className="flex items-center space-x-4">
+          <div className="w-10 h-10 rounded-lg bg-spore/10 border border-spore/20 flex items-center justify-center text-spore text-lg">
+            {roleIcons[status?.role] || '\u{1F5A5}\uFE0F'}
+          </div>
+          <div>
+            <h2 className="text-white font-mono font-bold text-sm">{status?.node_name || 'mycellm-node'}</h2>
+            <div className="flex items-center space-x-3 text-xs text-gray-500 mt-0.5">
+              <span>{federation?.network_name || 'Standalone'}</span>
+              {federation?.network_id && <span className="font-mono">{federation.network_id.slice(0, 8)}...</span>}
+              <span>&middot;</span>
+              <span>{formatUptime(uptime)} uptime</span>
             </div>
-            <Sparkline data={sparklines.requests || []} color="#EF4444" height={28} width={80} />
           </div>
         </div>
-        <div className="border p-5 rounded-xl border-white/10 bg-[#111]">
-          <h3 className="font-mono text-xs text-gray-500 mb-1">Tokens</h3>
-          <div className="flex items-end justify-between">
-            <div>
-              <span className="text-2xl font-mono text-poison">{stats.total_tokens || 0}</span>
-              <div className="text-xs text-gray-500 mt-0.5">{stats.tokens_per_min || 0}/min</div>
-            </div>
-            <Sparkline data={sparklines.tokens || []} color="#A855F7" height={28} width={80} />
+        <div className="flex items-center space-x-4 text-xs">
+          <div className="text-center">
+            <div className="text-xl font-mono text-white">{fleetGrid.length}</div>
+            <div className="text-gray-500">nodes</div>
+          </div>
+          <div className="text-center">
+            <div className="text-xl font-mono text-spore">{models.length}</div>
+            <div className="text-gray-500">models</div>
+          </div>
+          <div className="text-center">
+            <div className="text-xl font-mono text-ledger">{credits.balance?.toFixed(1)}</div>
+            <div className="text-gray-500">credits</div>
           </div>
         </div>
-        <StatCard label="Models" value={models.length} icon={Boxes} color="text-spore"
-          sub={networkModels.size > 0 ? `+${networkModels.size} on network` : 'local only'} />
-        <StatCard label="Inference" value={`${status?.inference?.active || 0}/${status?.inference?.max_concurrent || 2}`}
-          icon={Zap} color="text-compute"
-          highlight={status?.inference?.active > 0} />
+      </div>
+
+      {/* Stats Row with Sparklines */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="border border-white/10 bg-[#111] rounded-xl p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs text-gray-500 font-mono">REQUESTS</div>
+              <div className="text-2xl font-mono text-compute mt-1">{stats.total_requests || 0}</div>
+              <div className="text-xs text-gray-600">{stats.requests_per_min || 0}/min</div>
+            </div>
+            <Sparkline data={sparklines.requests || []} color="#EF4444" height={32} width={70} />
+          </div>
+        </div>
+        <div className="border border-white/10 bg-[#111] rounded-xl p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-xs text-gray-500 font-mono">TOKENS</div>
+              <div className="text-2xl font-mono text-poison mt-1">{stats.total_tokens || 0}</div>
+              <div className="text-xs text-gray-600">{stats.tokens_per_min || 0}/min</div>
+            </div>
+            <Sparkline data={sparklines.tokens || []} color="#A855F7" height={32} width={70} />
+          </div>
+        </div>
+        <div className="border border-white/10 bg-[#111] rounded-xl p-4">
+          <div className="text-xs text-gray-500 font-mono">CREDITS</div>
+          <div className="text-2xl font-mono text-ledger mt-1">{credits.balance?.toFixed(1)}</div>
+          <div className="text-xs text-gray-600">+{credits.earned?.toFixed(1) || '0'} / -{credits.spent?.toFixed(1) || '0'}</div>
+        </div>
+        <div className="border border-white/10 bg-[#111] rounded-xl p-4">
+          <div className="text-xs text-gray-500 font-mono">INFERENCE</div>
+          <div className={`text-2xl font-mono mt-1 ${(status?.inference?.active || 0) > 0 ? 'text-compute animate-pulse' : 'text-gray-400'}`}>
+            {status?.inference?.active || 0}/{status?.inference?.max_concurrent || 2}
+          </div>
+          <div className="text-xs text-gray-600">{(status?.inference?.active || 0) > 0 ? 'processing' : 'idle'}</div>
+        </div>
       </div>
 
       {/* Network Health */}
       <NetworkHealthBar connections={connections} peers={peers} fleetNodes={fleetNodes || []} />
 
-      {/* Network Topology */}
-      <NetworkTopology status={status} fleetNodes={fleetNodes} onNodeClick={setSelectedNode} />
-      {selectedNode && <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} />}
+      {/* Fleet Grid */}
+      {fleetGrid.length > 1 && (
+        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-3">Fleet ({fleetGrid.length} nodes)</h2>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+            {fleetGrid.map(node => (
+              <button key={node.id} onClick={() => setSelectedNode(node)}
+                className={`text-left bg-black border rounded-lg p-3 hover:bg-white/[0.03] transition-colors ${
+                  node.type === 'self' ? 'border-spore/30' : node.status === 'fleet' ? 'border-ledger/20' : 'border-white/10'
+                }`}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-sm">{roleIcons[node.role] || '\u{1F5A5}\uFE0F'}</span>
+                    <span className="font-mono text-xs text-white truncate max-w-[100px]">{node.name}</span>
+                  </div>
+                  <div className={`w-2 h-2 rounded-full ${statusDots[node.status] || 'bg-gray-600'}`} />
+                </div>
+                <div className="text-xs text-gray-500">
+                  {node.modelCount} model{node.modelCount !== 1 ? 's' : ''}
+                  <span className="mx-1">&middot;</span>
+                  <span className={node.type === 'self' ? 'text-spore' : node.type === 'fleet' ? 'text-ledger' : 'text-relay'}>{node.type}</span>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Activity Feed */}
       <div className="border border-white/10 bg-[#111] rounded-xl p-5">
         <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-3 flex items-center space-x-2">
           <Activity size={12} />
-          <span>Activity Feed</span>
-          {stats.requests_per_min > 0 && (
-            <span className="text-compute animate-pulse ml-2">● {stats.requests_per_min}/min</span>
-          )}
+          <span>Activity</span>
+          {stats.requests_per_min > 0 && <span className="text-compute animate-pulse">&bull; {stats.requests_per_min}/min</span>}
         </h2>
-        <ActivityFeed events={allEvents.slice(-100)} />
+        <ActivityFeed events={allEvents.slice(-80)} />
       </div>
 
-      {/* Connection Diagnostics */}
-      {connections.length > 0 && (
-        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
-          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4 flex items-center space-x-2">
-            <Gauge size={12} />
-            <span>Connections ({connections.length})</span>
-          </h2>
-          <div className="space-y-2">
-            {connections.map((c, i) => (
-              <div key={i} className="flex items-center justify-between bg-black border border-white/5 p-3 rounded-lg text-sm">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-2 h-2 rounded-full ${connectionStateDot(c.state)}`} />
-                  <span className="font-mono text-gray-300">{c.address}</span>
-                  {c.peer_id && <span className="font-mono text-xs text-gray-600">{c.peer_id.slice(0, 12)}...</span>}
-                </div>
-                <div className="flex items-center space-x-4 text-xs">
-                  <span className={connectionStateColor(c.state)}>{c.state}</span>
-                  {c.rtt_ms != null && <span className="text-gray-500">{c.rtt_ms}ms</span>}
-                  {c.uptime_seconds > 0 && <span className="text-gray-600">{formatUptime(c.uptime_seconds)}</span>}
-                  {c.reconnect_attempts > 0 && (
-                    <span className="text-compute text-xs">{c.reconnect_attempts} retries</span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Peers */}
-      {peers.length > 0 && (
-        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
-          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4">Authenticated Peers ({peers.length})</h2>
-          <div className="space-y-2">
-            {peers.map((p, i) => (
-              <div key={i} className="flex items-center justify-between bg-black border border-white/5 p-3 rounded-lg text-sm">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-2 h-2 rounded-full ${p.status === 'routable' ? 'bg-spore' : 'bg-gray-600'}`} />
-                  <span className="font-mono text-gray-300">{p.peer_id?.slice(0, 16)}...</span>
-                </div>
-                <div className="flex items-center space-x-4 text-xs text-gray-500">
-                  <span>{p.role}</span>
-                  <span>{p.models?.length || 0} models</span>
-                  <span className={p.status === 'routable' ? 'text-spore' : 'text-gray-600'}>{p.status}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* System Info */}
-      <div className="border border-white/10 bg-[#111] rounded-xl p-5">
-        <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4">System</h2>
-        {sysInfo ? <SystemInfoPanel sysInfo={sysInfo} /> : (
-          <div className="text-sm text-gray-500 flex items-center space-x-2">
-            <Loader2 size={14} className="animate-spin" /><span>Loading system info...</span>
-          </div>
-        )}
-      </div>
+      {selectedNode && <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} />}
     </div>
   )
 }
@@ -1345,18 +1346,37 @@ function SortHeader({ label, field, sortBy, sortDir, onSort }) {
 
 function ModelsTab({ status, onRefresh }) {
   const [devices, setDevices] = useState([]) // merged local + fleet
-  const [selected, setSelected] = useState('local') // 'local' or api_addr
+  const [selected, _setSelected] = useState('local') // 'local' or api_addr
+  const setSelected = (v) => {
+    _setSelected(v)
+    // Reset search state when switching nodes
+    setSearchResults([])
+    setRepoFiles(null)
+    setHasSearched(false)
+    setSuggestions(null)
+  }
   const [sortBy, setSortBy] = useState('name')
   const [sortDir, setSortDir] = useState('asc')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState(null)
-  const [backendType, setBackendType] = useState('openai')
   const [remoteStatus, setRemoteStatus] = useState(null)
+  const [addMode, setAddMode] = useState('browse') // 'browse' | 'local' | 'api'
+  const [searchQuery, setSearchQuery] = useState('')
+  const [searchResults, setSearchResults] = useState([])
+  const [searching, setSearching] = useState(false)
+  const [hasSearched, setHasSearched] = useState(false)
+  const [filterCompatible, setFilterCompatible] = useState(true)
+  const [suggestions, setSuggestions] = useState(null)
+  const [nodeResources, setNodeResources] = useState({ ram_gb: 0, disk_free_gb: 0 })
+  const [localFiles, setLocalFiles] = useState([])  // GGUF files on disk
+  const [savedConfigs, setSavedConfigs] = useState([])  // persisted API model configs
+  const [loadStatuses, setLoadStatuses] = useState([])  // in-progress loads
+  const [repoFiles, setRepoFiles] = useState(null) // { repo_id, files }
+  const [downloadStatus, setDownloadStatus] = useState({})
 
   const [form, setForm] = useState({
     name: '', model_path: '',
     api_base: 'https://openrouter.ai/api/v1', api_key: '', api_model: '', ctx_len: 4096,
-    api_key_hint: '',
   })
   const [showKey, setShowKey] = useState(false)
 
@@ -1364,11 +1384,12 @@ function ModelsTab({ status, onRefresh }) {
   useEffect(() => {
     const fetchDevices = async () => {
       const localHw = status?.hardware || {}
+      const selfAddr = window.location.hostname + ':' + (window.location.port || '8420')
       const localDevice = {
-        id: 'local', name: status?.node_name || 'this node', addr: 'local',
+        id: 'local', name: status?.node_name || 'this node', addr: selfAddr,
         gpu: localHw.gpu || 'CPU', backend: localHw.backend || 'cpu',
         ram: localHw.vram_gb || 0, models: status?.models || [],
-        online: true, role: status?.role || 'bootstrap',
+        online: true, role: status?.role || 'bootstrap', isSelf: true,
       }
 
       let fleet = []
@@ -1397,7 +1418,7 @@ function ModelsTab({ status, onRefresh }) {
 
   // Fetch selected remote node's live models
   const selectedDevice = devices.find(d => d.id === selected || d.addr === selected)
-  const isRemote = selected !== 'local'
+  const isRemote = selected !== 'local' && !selectedDevice?.isSelf
 
   useEffect(() => {
     if (!isRemote || !selectedDevice?.addr) { setRemoteStatus(null); return }
@@ -1417,6 +1438,8 @@ function ModelsTab({ status, onRefresh }) {
   }
 
   const sorted = [...devices].sort((a, b) => {
+    if (a.isSelf) return -1
+    if (b.isSelf) return 1
     let va = a[sortBy], vb = b[sortBy]
     if (typeof va === 'string') va = va.toLowerCase()
     if (typeof vb === 'string') vb = vb.toLowerCase()
@@ -1430,64 +1453,138 @@ function ModelsTab({ status, onRefresh }) {
     return isRemote ? remoteApi(selectedDevice.addr, path, opts) : api(path, opts)
   }
 
-  const handleLoad = async () => {
-    setLoading(true); setResult(null)
+  const handleUnload = async (modelName) => {
     try {
-      // If editing, unload old model first
-      if (editingModel) {
-        await doApi('/v1/node/models/unload', { model: editingModel })
+      await doApi('/v1/node/models/unload', { model: modelName })
+      onRefresh()
+    }
+    catch (e) { setResult({ error: e.message }) }
+  }
+
+  // Search HuggingFace
+  // Load suggestions + node resources + local files on mount
+  useEffect(() => {
+    const target = isRemote && selectedDevice?.addr ? selectedDevice.addr : ''
+    const doFetch = (path) => target ? remoteApi(target, path) : api(path)
+    doFetch('/v1/node/models/suggested').then(d => {
+      setSuggestions(d.suggestions || [])
+      setNodeResources({ ram_gb: d.node_ram_gb || 0, disk_free_gb: d.node_disk_free_gb || 0 })
+    }).catch(() => {})
+    doFetch('/v1/node/models/local').then(d => setLocalFiles(d.files || [])).catch(() => {})
+    doFetch('/v1/node/models/saved').then(d => setSavedConfigs(d.configs || [])).catch(() => {})
+  }, [selected, isRemote, selectedDevice?.addr])
+
+  // Poll load status for in-progress loads
+  useEffect(() => {
+    const poll = () => nodeApi('/v1/node/models/load-status').then(d => {
+      setLoadStatuses(d.statuses || [])
+      // If any loads just completed, refresh models
+      const justFinished = (d.statuses || []).some(s => s.status === 'ready' || s.status === 'failed')
+      if (justFinished) {
+        onRefresh()
+        nodeApi('/v1/node/models/local').then(d2 => setLocalFiles(d2.files || [])).catch(() => {})
+        nodeApi('/v1/node/models/saved').then(d2 => setSavedConfigs(d2.configs || [])).catch(() => {})
       }
-      const body = { backend: backendType, name: form.name }
-      if (backendType === 'llama.cpp') { body.model_path = form.model_path }
-      else {
-        body.api_base = form.api_base; body.api_key = form.api_key
-        body.api_model = form.api_model; body.ctx_len = parseInt(form.ctx_len) || 4096
+    }).catch(() => {})
+    poll()
+    const iv = setInterval(poll, 2000)
+    return () => clearInterval(iv)
+  }, [selected, isRemote, selectedDevice?.addr])
+
+  // Helper: fetch from selected node
+  const nodeApi = (path) => isRemote && selectedDevice?.addr ? remoteApi(selectedDevice.addr, path) : api(path)
+
+  const handleSearch = async () => {
+    if (!searchQuery.trim()) return
+    setSearching(true)
+    setHasSearched(true)
+    try {
+      const data = await nodeApi(`/v1/node/models/search?q=${encodeURIComponent(searchQuery)}&limit=12`)
+      setSearchResults(data.models || [])
+      if (data.node_ram_gb) setNodeResources({ ram_gb: data.node_ram_gb, disk_free_gb: data.node_disk_free_gb || 0 })
+    } catch (e) {
+      setSearchResults([])
+    }
+    setSearching(false)
+  }
+
+  // Browse repo files
+  const handleBrowseRepo = async (repoId) => {
+    try {
+      const data = await nodeApi(`/v1/node/models/search/${repoId}/files`)
+      setRepoFiles(data)
+    } catch {}
+  }
+
+  // Download a GGUF file
+  const handleDownload = async (repoId, filename, fileMeta) => {
+    try {
+      const data = await doApi('/v1/node/models/download', {
+        repo_id: repoId, filename,
+        quant: fileMeta?.quant || '',
+        param_b: repoFiles?.param_b || 0,
+        context_length: repoFiles?.context_length || 4096,
+        size_gb: fileMeta?.size_gb || 0,
+      })
+      if (data.download_id) {
+        setDownloadStatus(prev => ({ ...prev, [data.download_id]: data }))
+        const fetchDl = () => isRemote && selectedDevice?.addr
+          ? remoteApi(selectedDevice.addr, '/v1/node/models/downloads')
+          : api('/v1/node/models/downloads')
+        const pollId = setInterval(async () => {
+          try {
+            const st = await fetchDl()
+            const dl = (st.downloads || []).find(d => d.download_id === data.download_id)
+            if (dl) {
+              setDownloadStatus(prev => ({ ...prev, [data.download_id]: dl }))
+              if (dl.status === 'complete' || dl.status === 'failed') {
+                clearInterval(pollId)
+                onRefresh()
+                // Refresh local files list
+                const doFetch = isRemote && selectedDevice?.addr ? (p) => remoteApi(selectedDevice.addr, p) : api
+                doFetch('/v1/node/models/local').then(d => setLocalFiles(d.files || [])).catch(() => {})
+              }
+            }
+          } catch {}
+        }, 2000)
       }
-      const resp = await doApi('/v1/node/models/load', body)
-      const target = isRemote ? ` on ${selectedDevice.name}` : ''
-      const action = editingModel ? 'Updated' : 'Loaded'
-      setResult(resp.error ? { error: resp.error } : { success: `${action} "${resp.model}"${target}` })
-      if (!resp.error) { setEditingModel(null); onRefresh() }
+    } catch {}
+  }
+
+  // Load local GGUF file
+  const handleLoadLocal = async () => {
+    if (!form.model_path) return
+    setLoading(true)
+    try {
+      const data = await doApi('/v1/node/models/load', {
+        model_path: form.model_path,
+        name: form.name || undefined,
+        backend: 'llama.cpp',
+        ctx_len: form.ctx_len || 4096,
+      })
+      setResult(data)
+      if (!data.error) onRefresh()
     } catch (e) { setResult({ error: e.message }) }
     setLoading(false)
   }
 
-  const [editingModel, setEditingModel] = useState(null) // name of model being edited
-
-  const handleEdit = async (m) => {
-    setEditingModel(m.name)
-    setBackendType(m.backend === 'llama.cpp' ? 'llama.cpp' : 'openai')
-    setResult(null)
-
-    // Fetch full config from the node
+  // Connect remote API
+  const handleLoadApi = async () => {
+    if (!form.name || !form.api_base) return
+    setLoading(true)
     try {
-      const fetcher = isRemote
-        ? () => remoteApi(selectedDevice.addr, `/v1/node/models/${encodeURIComponent(m.name)}/config`)
-        : () => api(`/v1/node/models/${encodeURIComponent(m.name)}/config`)
-      const cfg = await fetcher()
-      setForm(f => ({
-        ...f,
-        name: cfg.name || m.name,
-        api_base: cfg.api_base || f.api_base,
-        api_model: cfg.api_model || '',
-        api_key: '', // never pre-fill — user must re-enter
-        api_key_hint: cfg.api_key_hint || '',
-        ctx_len: cfg.ctx_len || 4096,
-        model_path: cfg.model_path || '',
-      }))
-    } catch {
-      // Fallback: just fill what we know
-      setForm(f => ({ ...f, name: m.name, ctx_len: m.ctx_len || 4096 }))
-    }
-  }
-
-  const handleUnload = async (modelName) => {
-    try {
-      await doApi('/v1/node/models/unload', { model: modelName })
-      if (editingModel === modelName) setEditingModel(null)
-      onRefresh()
-    }
-    catch (e) { setResult({ error: e.message }) }
+      const data = await doApi('/v1/node/models/load', {
+        name: form.name,
+        backend: 'openai',
+        api_base: form.api_base,
+        api_key: form.api_key,
+        api_model: form.api_model || form.name,
+        ctx_len: form.ctx_len || 4096,
+      })
+      setResult(data)
+      if (!data.error) onRefresh()
+    } catch (e) { setResult({ error: e.message }) }
+    setLoading(false)
   }
 
   const thClass = 'text-left font-mono text-xs text-gray-500 uppercase tracking-wider py-2 px-3'
@@ -1550,129 +1647,484 @@ function ModelsTab({ status, onRefresh }) {
         </table>
       </div>
 
-      {/* Selected Device — Model Management */}
-      {selectedDevice && (
-        <div className="border border-spore/20 bg-[#111] rounded-xl p-5">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center space-x-3">
-              <MonitorSmartphone size={16} className="text-spore" />
-              <h2 className="font-mono text-sm font-medium text-white">{selectedDevice.name}</h2>
-              {isRemote && <span className="text-xs font-mono text-gray-500">{selectedDevice.addr}</span>}
-            </div>
-            <span className="text-xs font-mono text-gray-500">{selectedDevice.gpu} / {selectedDevice.backend}</span>
-          </div>
+      {/* Models — single unified reactive table */}
+      {(() => {
+        // Merge all sources into one list, one entry per model name
+        const merged = new Map() // name -> unified entry
 
-          {/* Loaded Models */}
-          {models.length > 0 && (
-            <div className="mb-5">
-              <h3 className="font-mono text-xs text-gray-500 mb-2">Loaded Models</h3>
-              <div className="space-y-1.5">
-                {models.map((m, i) => (
-                  <div key={i} className={`flex items-center justify-between p-2.5 rounded-lg border transition-colors ${
-                    editingModel === m.name ? 'bg-relay/10 border-relay/30' : 'bg-black border-white/5'
-                  }`}>
-                    <div className="flex items-center space-x-3 cursor-pointer" onClick={() => handleEdit(m)}>
-                      <Boxes size={13} className="text-spore" />
-                      <span className="font-mono text-sm">{m.name}</span>
-                      <span className="text-xs text-gray-600 bg-white/5 px-1.5 py-0.5 rounded">{m.backend}</span>
-                    </div>
-                    <div className="flex items-center space-x-1">
-                      <button onClick={() => handleEdit(m)} title="Edit"
-                        className="text-gray-600 hover:text-relay transition-colors p-1">
-                        <RefreshCw size={13} />
-                      </button>
-                      <button onClick={() => handleUnload(m.name)} title="Unload"
-                        className="text-gray-600 hover:text-compute transition-colors p-1">
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  </div>
-                ))}
+        // 1. Load statuses (highest priority for loading/failed)
+        for (const s of loadStatuses) {
+          if (s.status === 'loading' || s.status === 'failed') {
+            merged.set(s.model, {
+              name: s.model, state: s.status, backend: s.backend || 'llama.cpp',
+              phase: s.phase, error: s.error, elapsed: s.elapsed,
+              quant: '', size: '', ctx: 0,
+            })
+          }
+        }
+
+        // 2. Active loaded models
+        for (const m of models) {
+          const existing = merged.get(m.name)
+          if (existing?.state === 'loading') continue // loading takes precedence
+          const onDisk = localFiles.find(f => f.model_name === m.name)
+          merged.set(m.name, {
+            name: m.name, state: 'active', backend: m.backend || 'llama.cpp',
+            quant: m.quant || '', ctx: m.ctx_len || 4096,
+            size: onDisk ? `${onDisk.size_gb}GB` : m.param_count_b ? `~${(m.param_count_b * 0.5).toFixed(1)}GB` : '',
+            hasFile: !!onDisk, filename: onDisk?.filename, filePath: onDisk?.path,
+          })
+        }
+
+        // 3. On-disk GGUF files (not already in merged)
+        for (const f of localFiles) {
+          if (!merged.has(f.model_name)) {
+            merged.set(f.model_name, {
+              name: f.model_name, state: 'on-disk', backend: 'llama.cpp',
+              quant: f.quant || '', ctx: f.ctx_len || 0,
+              size: `${f.size_gb}GB`, hasFile: true, filename: f.filename, filePath: f.path,
+            })
+          }
+        }
+
+        // 4. Saved API configs (not already in merged)
+        for (const c of savedConfigs) {
+          if (!merged.has(c.name) && c.backend !== 'llama.cpp') {
+            merged.set(c.name, {
+              name: c.name, state: 'disabled', backend: c.backend,
+              quant: '', ctx: c.ctx_len || 4096, size: '',
+            })
+          }
+        }
+
+        const allModels = [...merged.values()]
+
+        // Sort: loading first, then active, then failed, then on-disk, then disabled
+        const stateOrder = { loading: 0, active: 1, failed: 2, 'on-disk': 3, disabled: 4 }
+        allModels.sort((a, b) => (stateOrder[a.state] ?? 9) - (stateOrder[b.state] ?? 9))
+
+        // Shape indicators by state
+        const stateIndicator = {
+          active:   <svg width="10" height="10" className="inline-block"><circle cx="5" cy="5" r="4" fill="#22C55E" /></svg>,
+          loading:  <svg width="10" height="10" className="inline-block animate-pulse"><polygon points="5,1 9,9 1,9" fill="#FACC15" /></svg>,
+          'on-disk': <svg width="10" height="10" className="inline-block"><rect x="1" y="1" width="8" height="8" fill="#666" rx="1" /></svg>,
+          disabled: <svg width="10" height="10" className="inline-block"><polygon points="5,0 10,5 5,10 0,5" fill="none" stroke="#666" strokeWidth="1.5" /></svg>,
+          failed:   <svg width="10" height="10" className="inline-block"><line x1="2" y1="2" x2="8" y2="8" stroke="#EF4444" strokeWidth="2" /><line x1="8" y1="2" x2="2" y2="8" stroke="#EF4444" strokeWidth="2" /></svg>,
+        }
+
+        const stateBadge = {
+          active:   <span className="text-xs px-1.5 py-0.5 rounded bg-spore/10 text-spore">active</span>,
+          loading:  <span className="text-xs px-1.5 py-0.5 rounded bg-ledger/10 text-ledger animate-pulse">loading</span>,
+          'on-disk': <span className="text-xs px-1.5 py-0.5 rounded bg-white/5 text-gray-500">on disk</span>,
+          disabled: <span className="text-xs px-1.5 py-0.5 rounded bg-white/5 text-gray-500">disabled</span>,
+          failed:   <span className="text-xs px-1.5 py-0.5 rounded bg-compute/10 text-compute">failed</span>,
+        }
+
+        const stateNameColor = {
+          active: 'text-white', loading: 'text-ledger', 'on-disk': 'text-gray-400',
+          disabled: 'text-gray-400', failed: 'text-compute',
+        }
+
+        const activeCount = allModels.filter(m => m.state === 'active').length
+        const loadingCount = allModels.filter(m => m.state === 'loading').length
+
+        // Refresh helper
+        const refreshAll = () => {
+          onRefresh()
+          nodeApi('/v1/node/models/local').then(d => setLocalFiles(d.files || [])).catch(() => {})
+          nodeApi('/v1/node/models/saved').then(d => setSavedConfigs(d.configs || [])).catch(() => {})
+        }
+
+        return (
+          <div className="border border-white/10 bg-[#111] rounded-xl overflow-hidden">
+            <div className="px-5 py-3 border-b border-white/10 flex items-center justify-between">
+              <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest flex items-center space-x-3">
+                <span>Models</span>
+                {activeCount > 0 && <span className="text-spore">● {activeCount} active</span>}
+                {loadingCount > 0 && <span className="text-ledger animate-pulse">▲ {loadingCount} loading</span>}
+              </h2>
+            </div>
+            {allModels.length > 0 ? (
+              <table className="w-full text-sm">
+                <thead className="bg-black/30">
+                  <tr className="text-xs text-gray-500 font-mono uppercase">
+                    <th className="text-left py-2 px-4 w-7"></th>
+                    <th className="text-left py-2 px-4">Name</th>
+                    <th className="text-left py-2 px-4 hidden md:table-cell">Backend</th>
+                    <th className="text-left py-2 px-4 hidden md:table-cell">Quant</th>
+                    <th className="text-left py-2 px-4 hidden md:table-cell">Size</th>
+                    <th className="text-left py-2 px-4 hidden lg:table-cell">Status</th>
+                    <th className="text-right py-2 px-4">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allModels.map((m) => (
+                    <tr key={m.name}
+                      className={`border-t border-white/5 transition-all duration-300 ${
+                        m.state === 'loading' ? 'bg-ledger/[0.03]' :
+                        m.state === 'failed' ? 'bg-compute/[0.03]' :
+                        m.state === 'active' ? 'hover:bg-white/[0.02]' :
+                        'hover:bg-white/[0.02] opacity-70'
+                      }`}>
+                      <td className="py-2.5 px-4" title={m.state}>{stateIndicator[m.state]}</td>
+                      <td className={`py-2.5 px-4 font-mono ${stateNameColor[m.state]}`}>
+                        {m.name}
+                        {m.state === 'loading' && m.phase && (
+                          <div className="text-xs text-ledger/70 font-sans mt-0.5">{m.phase}{m.elapsed ? ` · ${m.elapsed}s` : ''}</div>
+                        )}
+                        {m.state === 'failed' && m.error && (
+                          <div className="text-xs text-compute/70 font-sans mt-0.5 truncate max-w-[250px]" title={m.error}>{m.error}</div>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell">{m.backend}</td>
+                      <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell font-mono">{m.quant || '-'}</td>
+                      <td className="py-2.5 px-4 text-gray-500 hidden md:table-cell">{m.size || '-'}</td>
+                      <td className="py-2.5 px-4 hidden lg:table-cell">{stateBadge[m.state]}</td>
+                      <td className="py-2.5 px-4 text-right space-x-2 whitespace-nowrap">
+                        {m.state === 'active' && (
+                          <>
+                            <button onClick={async () => { await doApi('/v1/node/models/unload', { model: m.name }); refreshAll() }}
+                              className="text-xs text-gray-500 hover:text-ledger transition-colors">unload</button>
+                            {m.hasFile && (
+                              <button onClick={async () => {
+                                if (confirm(`Delete ${m.filename}? This will unload and remove the file.`)) {
+                                  await doApi('/v1/node/models/delete-file', { filename: m.filename }); refreshAll()
+                                }
+                              }} className="text-xs text-gray-600 hover:text-compute transition-colors">delete</button>
+                            )}
+                          </>
+                        )}
+                        {m.state === 'on-disk' && (
+                          <>
+                            <button onClick={async () => {
+                              await doApi('/v1/node/models/load', { model_path: m.filePath, name: m.name, backend: 'llama.cpp', ctx_len: m.ctx || 4096 })
+                              refreshAll()
+                            }} className="text-xs text-spore hover:text-spore/80 transition-colors">load</button>
+                            <button onClick={async () => {
+                              if (confirm(`Delete ${m.filename}?`)) { await doApi('/v1/node/models/delete-file', { filename: m.filename }); refreshAll() }
+                            }} className="text-xs text-gray-600 hover:text-compute transition-colors">delete</button>
+                          </>
+                        )}
+                        {m.state === 'disabled' && (
+                          <>
+                            <button onClick={async () => { await doApi('/v1/node/models/reload', { model: m.name }); refreshAll() }}
+                              className="text-xs text-spore hover:text-spore/80 transition-colors">enable</button>
+                            <button onClick={async () => {
+                              if (confirm(`Remove config for ${m.name}?`)) { await doApi('/v1/node/models/remove-config', { model: m.name }); refreshAll() }
+                            }} className="text-xs text-gray-600 hover:text-compute transition-colors">remove</button>
+                          </>
+                        )}
+                        {m.state === 'loading' && (
+                          <span className="text-xs text-gray-600 font-mono">{m.elapsed ? `${m.elapsed}s` : '...'}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div className="px-5 py-8 text-center text-sm text-gray-600">
+                No models on this node. Search HuggingFace below to get started.
               </div>
-            </div>
-          )}
+            )}
+          </div>
+        )
+      })()}
 
-          {/* Load Model Form */}
-          <div className="border-t border-white/5 pt-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-mono text-xs text-gray-500">
-                {editingModel ? `Edit: ${editingModel}` : 'Load Model'}
-              </h3>
-              {editingModel && (
-                <button onClick={() => { setEditingModel(null); setForm(f => ({ ...f, name: '' })); setResult(null) }}
-                  className="text-xs text-gray-500 hover:text-gray-300">Cancel edit</button>
-              )}
-            </div>
+      {/* Add Model */}
+      <div className="border border-white/10 bg-[#111] rounded-xl overflow-hidden">
+        <div className="flex border-b border-white/10">
+          {[
+            { id: 'browse', label: 'Browse HuggingFace', icon: '\u{1F917}' },
+            { id: 'local', label: 'Local File', icon: '\u{1F4C1}' },
+            { id: 'api', label: 'Remote API', icon: '\u{1F517}' },
+          ].map(tab => (
+            <button key={tab.id} onClick={() => setAddMode(tab.id)}
+              className={`flex items-center space-x-2 px-4 py-3 text-xs font-medium border-b-2 transition-all ${
+                addMode === tab.id ? 'border-spore text-white bg-black/20' : 'border-transparent text-gray-500 hover:text-gray-300'
+              }`}>
+              <span>{tab.icon}</span>
+              <span>{tab.label}</span>
+            </button>
+          ))}
+        </div>
 
-            <div className="flex bg-black rounded-lg p-1 border border-white/10 mb-4">
-              <button onClick={() => setBackendType('openai')}
-                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all ${
-                  backendType === 'openai' ? 'bg-relay text-white' : 'text-gray-500 hover:text-gray-300'
-                }`}>
-                <Globe size={12} className="inline mr-1.5" />OpenAI API
-              </button>
-              <button onClick={() => setBackendType('llama.cpp')}
-                className={`flex-1 py-1.5 px-3 rounded-md text-xs font-medium transition-all ${
-                  backendType === 'llama.cpp' ? 'bg-compute text-white' : 'text-gray-500 hover:text-gray-300'
-                }`}>
-                <Cpu size={12} className="inline mr-1.5" />Local GGUF
-              </button>
-            </div>
+        <div className="p-5">
+          {addMode === 'browse' && (
+            <div className="space-y-4">
+              <div className="flex space-x-2 items-center">
+                <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleSearch()}
+                  placeholder="Search models... (e.g. llama 7b, mistral, phi)"
+                  className="flex-1 bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                <button onClick={handleSearch} disabled={searching}
+                  className="bg-spore text-black px-4 py-2 rounded-lg text-sm font-medium hover:bg-spore/90 disabled:opacity-40 whitespace-nowrap">
+                  {searching ? 'Searching...' : 'Search'}
+                </button>
+                <button onClick={() => setFilterCompatible(f => !f)}
+                  className={`text-xs px-2 py-1.5 rounded border transition-colors whitespace-nowrap ${filterCompatible ? 'border-spore/30 text-spore bg-spore/5' : 'border-white/10 text-gray-500'}`}>
+                  {filterCompatible ? 'Compatible' : 'All sizes'}
+                </button>
+              </div>
 
-            <div className="space-y-2.5">
-              <input value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-                placeholder="Model name (on network)"
-                className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
-
-              {backendType === 'llama.cpp' ? (
-                <input value={form.model_path} onChange={e => setForm(f => ({ ...f, model_path: e.target.value }))}
-                  placeholder="GGUF path on target node"
-                  className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
-              ) : (
-                <>
-                  <input value={form.api_base} onChange={e => setForm(f => ({ ...f, api_base: e.target.value }))}
-                    placeholder="API base URL"
-                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
-                  <div className="relative">
-                    <input type={showKey ? 'text' : 'password'} value={form.api_key}
-                      onChange={e => setForm(f => ({ ...f, api_key: e.target.value }))}
-                      placeholder={editingModel && form.api_key_hint ? `Current key: ${form.api_key_hint} (re-enter to update)` : 'API key'}
-                      className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 pr-10 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
-                    <button onClick={() => setShowKey(!showKey)}
-                      className="absolute right-2 top-2 text-gray-500 hover:text-gray-300">
-                      {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
-                    </button>
+              {/* Repo file picker */}
+              {repoFiles && (
+                <div className="bg-black border border-white/10 rounded-lg p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <span className="font-mono text-sm text-white">{repoFiles.repo_id}</span>
+                      <div className="flex items-center space-x-3 mt-1 text-xs text-gray-500">
+                        {repoFiles.param_b > 0 && <span>{repoFiles.param_b}B params</span>}
+                        {repoFiles.architecture && <span>{repoFiles.architecture}</span>}
+                        {repoFiles.context_length > 0 && <span>{repoFiles.context_length.toLocaleString()} ctx</span>}
+                      </div>
+                    </div>
+                    <div className="flex items-center space-x-3">
+                      {repoFiles.disk_free_gb > 0 && <span className="text-xs text-gray-600">{repoFiles.disk_free_gb}GB free</span>}
+                      <button onClick={() => setFilterCompatible(f => !f)}
+                        className={`text-xs px-2 py-0.5 rounded border transition-colors ${filterCompatible ? 'border-spore/30 text-spore bg-spore/5' : 'border-white/10 text-gray-500'}`}>
+                        {filterCompatible ? 'Compatible only' : 'Show all'}
+                      </button>
+                      <button onClick={() => setRepoFiles(null)} className="text-xs text-gray-500 hover:text-white">&times;</button>
+                    </div>
                   </div>
-                  <div className="flex space-x-2">
-                    <input value={form.api_model} onChange={e => setForm(f => ({ ...f, api_model: e.target.value }))}
-                      placeholder="Upstream model ID"
-                      className="flex-grow bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
-                    <input type="number" value={form.ctx_len}
-                      onChange={e => setForm(f => ({ ...f, ctx_len: e.target.value }))}
-                      placeholder="ctx"
-                      className="w-24 bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                  <div className="overflow-x-auto max-h-[250px] overflow-y-auto custom-scrollbar">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-xs text-gray-600 font-mono">
+                          <th className="text-left py-1 pr-3">File</th>
+                          <th className="text-left py-1 pr-3">Quant</th>
+                          <th className="text-right py-1 pr-3">Size</th>
+                          <th className="text-right py-1 pr-3">RAM est.</th>
+                          <th className="text-right py-1"></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(repoFiles.files || []).filter(f => !filterCompatible || !f.warnings || f.warnings.length === 0).map((f, i) => {
+                          // Match download_id: sha256(repo/filename)[:16] — same as server
+                          const dlIdSrc = `${repoFiles.repo_id}/${f.filename}`
+                          // Find matching download by filename (more reliable than hash matching)
+                          const dl = Object.values(downloadStatus).find(d => d.filename === f.filename && d.repo_id === repoFiles.repo_id)
+                          const hasWarnings = f.warnings && f.warnings.length > 0
+                          const isOnDisk = localFiles.some(lf => lf.filename === f.filename)
+                          const isLoaded = models.some(m => f.filename.replace('.gguf', '') === m.name)
+
+                          return (
+                            <tr key={i} className={`border-t border-white/5 hover:bg-white/[0.02] ${hasWarnings && !isOnDisk ? 'opacity-60' : ''}`}>
+                              <td className="py-1.5 pr-3 font-mono text-gray-300 text-xs truncate max-w-[200px]" title={f.filename}>{f.filename}</td>
+                              <td className="py-1.5 pr-3">
+                                <span className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                                  f.quant?.startsWith('Q4') ? 'bg-spore/10 text-spore' :
+                                  f.quant?.startsWith('Q5') || f.quant?.startsWith('Q6') ? 'bg-relay/10 text-relay' :
+                                  f.quant?.startsWith('Q8') || f.quant === 'F16' ? 'bg-poison/10 text-poison' :
+                                  'bg-white/5 text-gray-500'
+                                }`}>{f.quant || '?'}</span>
+                              </td>
+                              <td className="py-1.5 pr-3 text-right text-xs text-gray-400">{f.size_gb}GB</td>
+                              <td className="py-1.5 pr-3 text-right text-xs text-gray-500">{f.est_ram_gb ? `~${f.est_ram_gb}GB` : '?'}</td>
+                              <td className="py-1.5 text-right min-w-[140px]">
+                                {hasWarnings && !isOnDisk && (
+                                  <span className="text-compute text-xs mr-2" title={f.warnings.join('; ')}>&#9888;</span>
+                                )}
+                                {dl && dl.status === 'downloading' ? (
+                                  <div className="inline-flex flex-col items-end gap-0.5">
+                                    <div className="w-24 bg-void rounded-full h-1.5 overflow-hidden border border-white/5">
+                                      <div className="h-full bg-ledger transition-all" style={{ width: `${dl.progress || 0}%` }} />
+                                    </div>
+                                    <span className="text-xs font-mono text-ledger">
+                                      {dl.progress?.toFixed(0)}%
+                                      {dl.speed_mbps > 0 && <span className="text-gray-500 ml-1">{dl.speed_mbps}MB/s</span>}
+                                      {dl.eta_seconds > 0 && <span className="text-gray-600 ml-1">{dl.eta_seconds > 60 ? `${Math.floor(dl.eta_seconds/60)}m` : `${dl.eta_seconds}s`}</span>}
+                                    </span>
+                                  </div>
+                                ) : dl && dl.status === 'complete' || isOnDisk ? (
+                                  <div className="inline-flex items-center space-x-2">
+                                    {isLoaded && <span className="text-xs text-spore">loaded</span>}
+                                    {!isLoaded && <span className="text-xs text-gray-500">on disk</span>}
+                                    <button onClick={async () => {
+                                      if (confirm(`Delete ${f.filename}?`)) {
+                                        await doApi('/v1/node/models/delete-file', { filename: f.filename })
+                                        const doFetch = isRemote && selectedDevice?.addr ? (p) => remoteApi(selectedDevice.addr, p) : api
+                                        doFetch('/v1/node/models/local').then(d => setLocalFiles(d.files || [])).catch(() => {})
+                                        onRefresh()
+                                      }
+                                    }} className="text-xs text-gray-600 hover:text-compute" title="Delete file">&#128465;</button>
+                                  </div>
+                                ) : dl && dl.status === 'failed' ? (
+                                  <span className="text-xs text-compute font-mono">failed</span>
+                                ) : (
+                                  <button onClick={() => handleDownload(repoFiles.repo_id, f.filename, f)}
+                                    className={`text-xs ${hasWarnings ? 'text-ledger hover:text-ledger/80' : 'text-spore hover:text-spore/80'}`}>
+                                    {hasWarnings ? 'Download anyway' : 'Download'}
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })}
+                      </tbody>
+                    </table>
+                    {filterCompatible && (repoFiles.files || []).some(f => f.warnings?.length > 0) && (
+                      <div className="text-xs text-gray-600 mt-2 px-1">
+                        {(repoFiles.files || []).filter(f => f.warnings?.length > 0).length} variant(s) hidden (exceed node resources).
+                        <button onClick={() => setFilterCompatible(false)} className="text-gray-400 hover:text-white ml-1 underline">Show all</button>
+                      </div>
+                    )}
                   </div>
-                </>
+                </div>
               )}
 
-              <button onClick={handleLoad} disabled={loading || !form.name}
-                className="flex items-center space-x-2 bg-spore text-black px-4 py-2 rounded-lg text-sm font-medium hover:bg-spore/90 disabled:opacity-40 disabled:cursor-not-allowed transition-all">
-                {loading ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-                <span>{loading ? 'Loading...' : editingModel ? 'Update Model' : 'Load Model'}</span>
-              </button>
+              {/* Search results */}
+              {searchResults.length > 0 && !repoFiles && (() => {
+                const isCompat = (m) => !m.est_min_ram_gb || !nodeResources.ram_gb || m.est_min_ram_gb <= nodeResources.ram_gb
+                const filtered = filterCompatible ? searchResults.filter(isCompat) : searchResults
+                const hiddenCount = searchResults.length - filtered.length
+                return (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                      {filtered.map((m, i) => {
+                        const compat = isCompat(m)
+                        return (
+                          <button key={i} onClick={() => handleBrowseRepo(m.repo_id)}
+                            className={`text-left bg-black border rounded-lg p-3 hover:border-spore/30 transition-colors ${compat ? 'border-white/10' : 'border-white/5 opacity-50'}`}>
+                            <div className="flex items-center justify-between">
+                              <div className="font-mono text-sm text-white truncate">{m.repo_id}</div>
+                              {!compat && <span className="text-compute text-xs ml-1" title="May exceed node resources">&#9888;</span>}
+                            </div>
+                            <div className="flex items-center flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-xs text-gray-500">
+                              {m.param_b > 0 && <span className="text-gray-300 font-medium">{m.param_b}B</span>}
+                              {m.architecture && <span>{m.architecture}</span>}
+                              {m.context_length > 0 && <span>{(m.context_length / 1000).toFixed(0)}k ctx</span>}
+                              {m.est_min_size_gb > 0 && <span>~{m.est_min_size_gb}GB</span>}
+                              <span>&darr;{m.downloads?.toLocaleString()}</span>
+                              {m.license && <span>{m.license}</span>}
+                            </div>
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {hiddenCount > 0 && (
+                      <div className="text-xs text-gray-600 mt-2">
+                        {hiddenCount} model(s) hidden (too large for {nodeResources.ram_gb}GB RAM).
+                        <button onClick={() => setFilterCompatible(false)} className="text-gray-400 hover:text-white ml-1 underline">Show all</button>
+                      </div>
+                    )}
+                  </>
+                )
+              })()}
 
-              {result && (
-                <div className={`flex items-center space-x-2 text-sm p-2.5 rounded-lg ${
-                  result.error ? 'bg-compute/10 text-compute' : 'bg-spore/10 text-spore'
-                }`}>
-                  {result.error ? <AlertCircle size={14} /> : <Check size={14} />}
-                  <span>{result.error || result.success}</span>
+              {searchResults.length === 0 && !searching && hasSearched && (
+                <div className="text-center text-sm text-gray-600 py-4">No GGUF models found for &ldquo;{searchQuery}&rdquo;</div>
+              )}
+
+              {/* Suggested models — show when no search active */}
+              {!hasSearched && !repoFiles && suggestions && suggestions.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-xs text-gray-500 font-mono uppercase tracking-wider">Suggested for this node</h3>
+                    {nodeResources.ram_gb > 0 && <span className="text-xs text-gray-600">{nodeResources.ram_gb}GB RAM · {nodeResources.disk_free_gb}GB disk free</span>}
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {suggestions.filter(s => !filterCompatible || s.compatible).map((s, i) => (
+                      <button key={i} onClick={() => handleBrowseRepo(s.repo_id)}
+                        className={`text-left bg-black border rounded-lg p-3 hover:border-spore/30 transition-colors ${s.compatible ? 'border-spore/20' : 'border-white/5 opacity-50'}`}>
+                        <div className="flex items-center justify-between">
+                          <span className="font-mono text-sm text-white truncate">{s.repo_id.split('/').pop()}</span>
+                          {s.compatible
+                            ? <span className="text-spore text-xs">&#10003;</span>
+                            : <span className="text-compute text-xs">&#9888;</span>
+                          }
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">{s.description}</div>
+                        <div className="flex items-center space-x-3 mt-1 text-xs text-gray-600">
+                          <span>{s.param_b}B</span>
+                          <span>~{s.est_size_gb}GB (Q4)</span>
+                          <span>needs {s.min_ram_gb}GB+ RAM</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                  {filterCompatible && suggestions.some(s => !s.compatible) && (
+                    <div className="text-xs text-gray-600 mt-2">
+                      {suggestions.filter(s => !s.compatible).length} model(s) hidden.
+                      <button onClick={() => setFilterCompatible(false)} className="text-gray-400 hover:text-white ml-1 underline">Show all</button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          </div>
+          )}
+
+          {addMode === 'local' && (
+            <div className="space-y-3">
+              <p className="text-xs text-gray-500">Load a GGUF model file from the local filesystem.</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="md:col-span-2">
+                  <label className="text-xs text-gray-500 block mb-1">Model path (.gguf)</label>
+                  <input value={form.model_path} onChange={e => setForm(f => ({...f, model_path: e.target.value}))}
+                    placeholder="/path/to/model.gguf"
+                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Name (optional)</label>
+                  <input value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}
+                    placeholder="my-model"
+                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                </div>
+              </div>
+              <button onClick={() => handleLoadLocal()} disabled={loading}
+                className="bg-spore text-black px-4 py-2 rounded-lg text-sm font-medium hover:bg-spore/90 disabled:opacity-40">
+                {loading ? 'Loading...' : 'Load Model'}
+              </button>
+            </div>
+          )}
+
+          {addMode === 'api' && (
+            <div className="space-y-3">
+              <p className="text-xs text-gray-500">Connect to an OpenAI-compatible API endpoint (OpenRouter, Ollama, vLLM, etc.)</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Model name</label>
+                  <input value={form.name} onChange={e => setForm(f => ({...f, name: e.target.value}))}
+                    placeholder="claude-sonnet"
+                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">API Base URL</label>
+                  <input value={form.api_base} onChange={e => setForm(f => ({...f, api_base: e.target.value}))}
+                    placeholder="https://openrouter.ai/api/v1"
+                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">API Key</label>
+                  <input type={showKey ? 'text' : 'password'} value={form.api_key} onChange={e => setForm(f => ({...f, api_key: e.target.value}))}
+                    placeholder="sk-..."
+                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-500 block mb-1">Upstream model</label>
+                  <input value={form.api_model} onChange={e => setForm(f => ({...f, api_model: e.target.value}))}
+                    placeholder="anthropic/claude-sonnet-4"
+                    className="w-full bg-black border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:border-spore/50 focus:outline-none" />
+                </div>
+              </div>
+              <button onClick={() => handleLoadApi()} disabled={loading}
+                className="bg-white/10 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-white/20 disabled:opacity-40">
+                {loading ? 'Connecting...' : 'Connect API'}
+              </button>
+            </div>
+          )}
+
+          {result && (
+            <div className={`flex items-center space-x-2 text-sm p-2.5 rounded-lg mt-3 ${
+              result.error ? 'bg-compute/10 text-compute' : 'bg-spore/10 text-spore'
+            }`}>
+              {result.error ? <AlertCircle size={14} /> : <Check size={14} />}
+              <span>{result.error || result.success}</span>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   )
 }
@@ -1682,17 +2134,19 @@ function ModelsTab({ status, onRefresh }) {
 function ChatTab() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
-  const [model, setModel] = useState('')
+  const [model, setModel] = useState('auto')  // 'auto' = best available
   const [models, setModels] = useState([])
   const [sending, setSending] = useState(false)
   const endRef = useRef(null)
 
+  // Fetch models on mount + poll (includes fleet)
   useEffect(() => {
-    api('/v1/models').then(d => {
-      const list = d.data || []
-      setModels(list)
-      if (list.length > 0 && !model) setModel(list[0].id)
-    }).catch(() => {})
+    const fetch_ = () => api('/v1/models').then(d => setModels(d.data || [])).catch(() => {})
+    fetch_()
+    // Poll faster initially to catch fleet announcements, then slow down
+    const fast = setInterval(fetch_, 3000)
+    const slowDown = setTimeout(() => { clearInterval(fast); setInterval(fetch_, 10000) }, 15000)
+    return () => { clearInterval(fast); clearTimeout(slowDown) }
   }, [])
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
@@ -1710,15 +2164,16 @@ function ChatTab() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: model || undefined,
+          model: model === 'auto' ? '' : model,  // empty = auto-route
           messages: history.map(m => ({ role: m.role, content: m.content })),
           max_tokens: 2048,
         }),
       })
       const text = resp.choices?.[0]?.message?.content || '[no response]'
       const usage = resp.usage || {}
+      const routedTo = resp.model || 'unknown'
       setMessages([...history, {
-        role: 'assistant', content: text, model: resp.model,
+        role: 'assistant', content: text, model: routedTo,
         tokens: `${usage.prompt_tokens || 0}+${usage.completion_tokens || 0}`,
       }])
     } catch (e) {
@@ -1727,20 +2182,30 @@ function ChatTab() {
     setSending(false)
   }
 
+  // Group models by source
+  const localModels = models.filter(m => m.owned_by === 'local')
+  const peerModels = models.filter(m => m.owned_by?.startsWith('peer:'))
+  const fleetModels = models.filter(m => m.owned_by?.startsWith('fleet:'))
+
   return (
     <div className="border border-white/10 bg-[#111] rounded-xl overflow-hidden flex flex-col h-[calc(100vh-220px)]">
       {/* Model selector */}
       <div className="h-12 border-b border-white/10 bg-black/50 flex items-center px-4 space-x-3">
         <MessageSquare size={14} className="text-spore" />
         <select value={model} onChange={e => setModel(e.target.value)}
-          className="bg-black border border-white/10 rounded px-2 py-1 text-sm font-mono text-white focus:outline-none">
-          {models.map(m => <option key={m.id} value={m.id}>{m.id} ({m.owned_by})</option>)}
-          {models.length === 0 && <option value="">No models available</option>}
+          className="bg-black border border-white/10 rounded px-2 py-1 text-sm font-mono text-white focus:outline-none min-w-[200px]">
+          <option value="auto">Automatic (best available)</option>
+          {localModels.length > 0 && <optgroup label="Local">
+            {localModels.map(m => <option key={m.id} value={m.id}>{m.id}</option>)}
+          </optgroup>}
+          {fleetModels.length > 0 && <optgroup label="Fleet">
+            {fleetModels.map(m => <option key={m.id} value={m.id}>{m.id} ({m.owned_by.replace('fleet:', '')})</option>)}
+          </optgroup>}
+          {peerModels.length > 0 && <optgroup label="Peers (QUIC)">
+            {peerModels.map(m => <option key={m.id} value={m.id}>{m.id} ({m.owned_by.replace('peer:', '')})</option>)}
+          </optgroup>}
         </select>
-        <button onClick={() => api('/v1/models').then(d => { setModels(d.data || []) }).catch(() => {})}
-          className="text-gray-500 hover:text-gray-300 transition-colors">
-          <RefreshCw size={12} />
-        </button>
+        <span className="text-xs text-gray-600">{models.length} model{models.length !== 1 ? 's' : ''} on network</span>
         <button onClick={() => setMessages([])}
           className="ml-auto text-xs text-gray-500 hover:text-gray-300 flex items-center space-x-1">
           <Trash2 size={12} /><span>Clear</span>
@@ -1752,8 +2217,16 @@ function ChatTab() {
         {messages.length === 0 && (
           <div className="text-center py-12 text-gray-500">
             <MessageSquare size={32} className="mx-auto mb-3 opacity-30" />
-            <p className="text-sm">Send a message to test inference routing.</p>
-            <p className="text-xs mt-1 text-gray-600">Requests route through the network to the best available peer.</p>
+            <p className="text-sm">Send a message to start a conversation.</p>
+            <p className="text-xs mt-1 text-gray-600">
+              {model === 'auto'
+                ? 'Automatic mode — routes to the best available model on the network.'
+                : `Using ${model}. The network handles routing and failover.`
+              }
+            </p>
+            {models.length === 0 && (
+              <p className="text-xs mt-2 text-compute">No models available. Load a model on the Models tab first.</p>
+            )}
           </div>
         )}
         {messages.map((m, i) => (
@@ -1959,10 +2432,20 @@ function AuthGate({ onAuth }) {
 export default function App() {
   const [appState, setAppState] = useState('checking') // checking → auth | booting → dashboard
   const [tab, _setTab] = useState(() => {
-    const hash = window.location.hash.slice(1)
-    return TABS.find(t => t.id === hash) ? hash : 'overview'
+    const path = window.location.pathname.slice(1)
+    return TABS.find(t => t.id === path) ? path : 'overview'
   })
-  const setTab = (id) => { _setTab(id); window.location.hash = id }
+  const setTab = (id) => { _setTab(id); window.history.pushState(null, '', `/${id}`) }
+
+  // Handle browser back/forward
+  useEffect(() => {
+    const onPop = () => {
+      const path = window.location.pathname.slice(1)
+      _setTab(TABS.find(t => t.id === path) ? path : 'overview')
+    }
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
   const [status, setStatus] = useState(null)
   const [credits, setCredits] = useState({ balance: 0, earned: 0, spent: 0 })
   const [logs, setLogs] = useState([])

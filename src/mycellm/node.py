@@ -293,6 +293,12 @@ class MycellmNode:
                     capabilities=hello.capabilities,
                 )
                 conn.state = PeerState.ROUTABLE
+
+                # Set network membership info
+                reg_entry = self.registry.get(hello.peer_id)
+                if reg_entry:
+                    reg_entry.network_ids = hello.network_ids
+
                 self.activity.record(
                     EventType.PEER_CONNECTED,
                     peer_id=hello.peer_id,
@@ -624,11 +630,22 @@ class MycellmNode:
         # Load cached peers
         self._load_peer_cache()
 
-        # Restore persisted models
-        restored = await self.inference.restore_models(self._settings.data_dir)
-        if restored:
-            self.capabilities.models = self.inference.loaded_models
-            logger.info(f"{styled_tag('BOOT')} Restored {restored} model(s)")
+        # Restore persisted models (non-blocking — don't delay API startup)
+        async def _restore_models_bg():
+            try:
+                restored = await asyncio.wait_for(
+                    self.inference.restore_models(self._settings.data_dir),
+                    timeout=30.0,
+                )
+                if restored:
+                    self.capabilities.models = self.inference.loaded_models
+                    logger.info(f"{styled_tag('BOOT')} Restored {restored} model(s)")
+                    await self.announce_capabilities()
+            except asyncio.TimeoutError:
+                logger.warning(f"{styled_tag('BOOT')} Model restore timed out — will retry via dashboard")
+            except Exception as e:
+                logger.warning(f"{styled_tag('BOOT')} Model restore failed: {e}")
+        asyncio.ensure_future(_restore_models_bg())
 
         hw = self._detect_hardware()
         self.capabilities = Capabilities(
@@ -636,6 +653,7 @@ class MycellmNode:
             hardware=hw,
             role=self.device_cert.role if self.device_cert else "seeder",
             version="0.1.0",
+            network_ids=self.federation.network_ids if self.federation else [],
         )
 
         self._running = True

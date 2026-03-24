@@ -87,18 +87,49 @@ async def load_model(request: Request):
     if backend_type == "llama.cpp" and not model_path:
         return {"error": "model_path required for llama.cpp backend"}
 
+    model_name = name or (model_path.split("/")[-1].replace(".gguf", "") if model_path else "remote-model")
+
+    # For llama.cpp, load async (can take minutes for large models)
+    if backend_type == "llama.cpp":
+        import asyncio
+
+        async def _bg_load():
+            try:
+                loaded_name = await node.inference.load_model(
+                    model_path, name=name, backend_type=backend_type,
+                    ctx_len=body.get("ctx_len", 4096), timeout=body.get("timeout", 120),
+                    quant=body.get("quant", ""),
+                )
+                scope = body.get("scope", "home")
+                info = node.inference._model_info.get(loaded_name)
+                if info:
+                    info.scope = scope
+                    info.visible_networks = body.get("visible_networks", [])
+                    if body.get("param_count_b"):
+                        info.param_count_b = body["param_count_b"]
+                node.capabilities.models = node.inference.loaded_models
+                await node.announce_capabilities()
+                node.activity.record(EventType.MODEL_LOADED, model=loaded_name, backend=backend_type)
+            except Exception:
+                pass  # error captured in _load_status
+
+        asyncio.ensure_future(_bg_load())
+        return {"status": "loading", "model": model_name, "backend": backend_type}
+
+    # For API backends, load synchronously (fast — just a connectivity check)
     try:
         loaded_name = await node.inference.load_model(
-            model_path,
-            name=name,
-            backend_type=backend_type,
-            api_base=body.get("api_base", ""),
-            api_key=body.get("api_key", ""),
-            api_model=body.get("api_model", ""),
-            ctx_len=body.get("ctx_len", 4096),
+            model_path, name=name, backend_type=backend_type,
+            api_base=body.get("api_base", ""), api_key=body.get("api_key", ""),
+            api_model=body.get("api_model", ""), ctx_len=body.get("ctx_len", 4096),
             timeout=body.get("timeout", 120),
         )
-        # Update capabilities and announce to peers
+        scope = body.get("scope", "home")
+        info = node.inference._model_info.get(loaded_name)
+        if info:
+            info.scope = scope
+            info.visible_networks = body.get("visible_networks", [])
+
         node.capabilities.models = node.inference.loaded_models
         await node.announce_capabilities()
         node.activity.record(EventType.MODEL_LOADED, model=loaded_name, backend=backend_type)
@@ -121,6 +152,87 @@ async def unload_model(request: Request):
     await node.announce_capabilities()
     node.activity.record(EventType.MODEL_UNLOADED, model=model_name)
     return {"status": "unloaded", "model": model_name}
+
+
+@router.get("/models/load-status")
+async def model_load_status(request: Request):
+    """Get status of model loading operations (in-progress + recent)."""
+    import time
+    node = request.app.state.node
+    statuses = []
+    for name, s in node.inference._load_status.items():
+        entry = {**s}
+        if s.get("status") == "loading":
+            entry["elapsed"] = round(time.time() - s.get("started_at", 0), 1)
+        statuses.append(entry)
+    return {"statuses": statuses}
+
+
+@router.get("/models/saved")
+async def list_saved_configs(request: Request):
+    """List all saved model configs (loaded + unloaded API models)."""
+    node = request.app.state.node
+    loaded_names = {m.name for m in node.inference.loaded_models}
+    configs = []
+    for c in node.inference.get_saved_configs():
+        configs.append({
+            **c,
+            "loaded": c.get("name", "") in loaded_names,
+            "api_key": "***" if c.get("api_key") else "",  # mask key
+        })
+    return {"configs": configs}
+
+
+@router.post("/models/reload")
+async def reload_model(request: Request):
+    """Re-load a previously saved (unloaded) model config."""
+    node = request.app.state.node
+    body = await request.json()
+    model_name = body.get("model", "")
+    if not model_name:
+        return {"error": "model name required"}
+
+    # Find in saved configs
+    config = node.inference._saved_configs.get(model_name)
+    if not config:
+        return {"error": f"No saved config for '{model_name}'"}
+
+    backend_type = config.get("backend", "llama.cpp")
+    try:
+        await node.inference.load_model(
+            config.get("model_path", ""),
+            name=model_name,
+            backend_type=backend_type,
+            api_base=config.get("api_base", ""),
+            api_key=config.get("api_key", ""),
+            api_model=config.get("api_model", ""),
+            ctx_len=config.get("ctx_len", 4096),
+        )
+        node.capabilities.models = node.inference.loaded_models
+        await node.announce_capabilities()
+        node.activity.record(EventType.MODEL_LOADED, model=model_name, backend=backend_type)
+        return {"status": "loaded", "model": model_name}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/models/remove-config")
+async def remove_saved_config(request: Request):
+    """Permanently remove a saved model config."""
+    node = request.app.state.node
+    body = await request.json()
+    model_name = body.get("model", "")
+    if not model_name:
+        return {"error": "model name required"}
+
+    # Unload if loaded
+    if model_name in {m.name for m in node.inference.loaded_models}:
+        await node.inference.unload_model(model_name)
+        node.capabilities.models = node.inference.loaded_models
+
+    from mycellm.config import get_settings
+    await node.inference.remove_saved_config(model_name, get_settings().data_dir)
+    return {"status": "removed", "model": model_name}
 
 
 @router.get("/models/{model_name}/config")
@@ -224,6 +336,68 @@ async def create_invite(request: Request):
         "portable": token.to_portable(),
         "expires_at": token.expires_at,
         "max_uses": token.max_uses,
+    }
+
+
+@router.post("/federation/join")
+async def join_network(request: Request):
+    """Join a network using an invite token or network details."""
+    node = request.app.state.node
+    if not node.federation:
+        return {"error": "Federation not initialized"}
+    body = await request.json()
+
+    # Join via direct network details
+    network_id = body.get("network_id", "")
+    if not network_id:
+        # Try to extract from invite token
+        portable = body.get("invite_token", "")
+        if portable:
+            from mycellm.federation import InviteToken
+            try:
+                token = InviteToken.from_portable(portable)
+                network_id = token.network_id
+            except Exception as e:
+                return {"error": f"Invalid invite token: {e}"}
+
+    if not network_id:
+        return {"error": "network_id or invite_token required"}
+
+    membership = node.federation.join_network(
+        network_id=network_id,
+        network_name=body.get("network_name", ""),
+        role=body.get("role", "seeder"),
+        bootstrap_addrs=body.get("bootstrap_addrs", []),
+        models=body.get("models", []),
+        quota=body.get("quota", {}),
+    )
+    return {"status": "joined", "membership": membership.to_dict()}
+
+
+@router.post("/federation/leave")
+async def leave_network(request: Request):
+    """Leave a joined network."""
+    node = request.app.state.node
+    if not node.federation:
+        return {"error": "Federation not initialized"}
+    body = await request.json()
+    network_id = body.get("network_id", "")
+    if not network_id:
+        return {"error": "network_id required"}
+    ok = node.federation.leave_network(network_id)
+    return {"status": "left" if ok else "failed"}
+
+
+@router.get("/federation/memberships")
+async def list_memberships(request: Request):
+    """List all network memberships."""
+    node = request.app.state.node
+    if not node.federation:
+        return {"memberships": [], "home_network": ""}
+    return {
+        "home_network": node.federation.network_id,
+        "memberships": [m.to_dict() for m in node.federation.memberships],
+        "network_ids": node.federation.network_ids,
     }
 
 

@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from mycellm.api.admin import router as admin_router
+from mycellm.api.models import router as models_router
 from mycellm.api.node import router as node_router
 from mycellm.api.openai import router as openai_router
 
@@ -81,6 +82,7 @@ def create_app(node: MycellmNode) -> FastAPI:
     app.include_router(openai_router, prefix="/v1")
     app.include_router(node_router, prefix="/v1/node")
     app.include_router(admin_router, prefix="/v1/admin")
+    app.include_router(models_router, prefix="/v1/node/models")
 
     # Health check (always public — includes auth_required flag for clients)
     @app.get("/health")
@@ -91,15 +93,31 @@ def create_app(node: MycellmNode) -> FastAPI:
             "auth_required": bool(settings.api_key),
         }
 
-    # Try to mount web dashboard static files
+    # Serve web dashboard with SPA fallback
     try:
         from importlib.resources import files
+        from fastapi.responses import FileResponse, HTMLResponse
         import os
 
         web_dir = files("mycellm.web")
         web_path = str(web_dir)
         if os.path.isdir(web_path) and os.listdir(web_path):
-            app.mount("/", StaticFiles(directory=web_path, html=True), name="dashboard")
+            index_html = os.path.join(web_path, "index.html")
+
+            # Mount static assets (css, js, etc.)
+            assets_dir = os.path.join(web_path, "assets")
+            if os.path.isdir(assets_dir):
+                app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+
+            # SPA catch-all: any non-API path serves index.html
+            @app.get("/{path:path}")
+            async def spa_fallback(path: str):
+                # Serve actual files if they exist (favicon, etc.)
+                file_path = os.path.join(web_path, path)
+                if path and os.path.isfile(file_path):
+                    return FileResponse(file_path)
+                return FileResponse(index_html)
+
     except Exception:
         pass
 
