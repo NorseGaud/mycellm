@@ -12,7 +12,6 @@
 <p align="center">
   <a href="https://mycellm.ai">Website</a> ·
   <a href="https://docs.mycellm.dev/quickstart/install">Docs</a> ·
-  <a href="https://mycellm.ai/chat">Try it</a> ·
   <a href="https://mycellm.ai/join">Join the network</a>
 </p>
 
