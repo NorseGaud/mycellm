@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import Optional
+
+logger = logging.getLogger("mycellm.api")
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
@@ -18,6 +21,16 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class MycellmRouting(BaseModel):
+    min_tier: str = ""          # "frontier", "capable", "fast", "tiny"
+    min_params: float = 0       # minimum param count in billions
+    min_context: int = 0        # minimum context window
+    required_tags: list[str] = []  # must have these tags
+    max_cost: float = 0         # max credits per request (0 = unlimited)
+    routing: str = "best"       # "best", "fastest", "ensemble"
+    fallback: str = "downgrade" # "reject" or "downgrade"
+
+
 class ChatCompletionRequest(BaseModel):
     model: str = ""
     messages: list[ChatMessage]
@@ -25,6 +38,12 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = None
     stream: bool = False
     top_p: float = 1.0
+    stop: list[str] | str | None = None
+    frequency_penalty: float = 0
+    presence_penalty: float = 0
+    seed: int | None = None
+    response_format: dict | None = None  # {"type": "json_object"}
+    mycellm: MycellmRouting | None = None
 
 
 class ChatCompletionChoice(BaseModel):
@@ -67,12 +86,46 @@ async def chat_completions(request: Request, body: ChatCompletionRequest):
     model_name = node.inference.resolve_model_name(body.model) if body.model else ""
     routed_to = ""
 
+    # Build quality constraints from mycellm routing params
+    constraints = None
+    if body.mycellm:
+        from mycellm.router.model_resolver import QualityConstraints
+        constraints = QualityConstraints(
+            min_tier=body.mycellm.min_tier,
+            min_params=body.mycellm.min_params,
+            min_context=body.mycellm.min_context,
+            required_tags=body.mycellm.required_tags,
+            max_cost=body.mycellm.max_cost,
+        )
+
     if not model_name and node.model_resolver:
         resolved = node.model_resolver.resolve(
             body.model,
             node.inference.loaded_models,
             fleet_registry=node.node_registry,
+            constraints=constraints,
         )
+        if not resolved and constraints and body.mycellm:
+            if body.mycellm.fallback == "reject":
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "error": {
+                            "message": "No models match the requested quality constraints.",
+                            "type": "quality_constraint_error",
+                            "code": "no_matching_model",
+                        }
+                    },
+                )
+            elif body.mycellm.fallback == "downgrade":
+                # Retry without constraints
+                resolved = node.model_resolver.resolve(
+                    body.model,
+                    node.inference.loaded_models,
+                    fleet_registry=node.node_registry,
+                )
+                # We'll add a warning header below
+
         if resolved:
             best = resolved[0]
             if best.source == "local":
@@ -120,12 +173,22 @@ async def chat_completions(request: Request, body: ChatCompletionRequest):
     if model_name:
         from mycellm.inference.base import InferenceRequest
 
+        # Normalize stop to list[str] | None
+        stop = body.stop
+        if isinstance(stop, str):
+            stop = [stop]
+
         req = InferenceRequest(
             messages=messages,
             model=model_name,
             temperature=body.temperature,
             max_tokens=body.max_tokens or 2048,
             top_p=body.top_p,
+            stop=stop,
+            frequency_penalty=body.frequency_penalty,
+            presence_penalty=body.presence_penalty,
+            seed=body.seed,
+            response_format=body.response_format,
         )
         try:
             result = await node.inference.generate(req)
@@ -232,12 +295,22 @@ async def _stream_response(node, body: ChatCompletionRequest, messages: list[dic
         if model_name:
             from mycellm.inference.base import InferenceRequest
 
+            # Normalize stop to list[str] | None
+            stop = body.stop
+            if isinstance(stop, str):
+                stop = [stop]
+
             req = InferenceRequest(
                 messages=messages,
                 model=model_name,
                 temperature=body.temperature,
                 max_tokens=body.max_tokens or 2048,
                 top_p=body.top_p,
+                stop=stop,
+                frequency_penalty=body.frequency_penalty,
+                presence_penalty=body.presence_penalty,
+                seed=body.seed,
+                response_format=body.response_format,
             )
 
             # Send role delta first
@@ -272,20 +345,67 @@ async def _stream_response(node, body: ChatCompletionRequest, messages: list[dic
                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
             })
         else:
-            yield json.dumps({
-                "id": chunk_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": body.model or "none",
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": "[mycellm] No model available.",
-                    },
-                    "finish_reason": "stop",
-                }],
-            })
+            # Try fleet streaming
+            import httpx
+            fleet_handled = False
+            for entry in node.node_registry.values():
+                if entry.get("status") != "approved" or not entry.get("api_addr"):
+                    continue
+                caps = entry.get("capabilities", {})
+                fleet_models = [m.get("name", m) if isinstance(m, dict) else m for m in caps.get("models", [])]
+                if body.model and body.model not in fleet_models:
+                    continue
+
+                addr = entry["api_addr"]
+                base = f"http://{addr}" if not addr.startswith("http") else addr
+                url = f"{base}/v1/chat/completions"
+
+                try:
+                    headers = {"Content-Type": "application/json"}
+                    from mycellm.config import get_settings
+                    settings = get_settings()
+                    if settings.api_key:
+                        headers["Authorization"] = f"Bearer {settings.api_key}"
+
+                    payload = {
+                        "model": body.model,
+                        "messages": messages,
+                        "temperature": body.temperature,
+                        "max_tokens": body.max_tokens or 2048,
+                        "stream": True,
+                    }
+
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+                            if resp.status_code == 200:
+                                fleet_handled = True
+                                async for line in resp.aiter_lines():
+                                    if line.startswith("data: "):
+                                        data = line[6:]
+                                        if data == "[DONE]":
+                                            yield "[DONE]"
+                                            return
+                                        yield data
+                                return
+                except Exception as e:
+                    logging.getLogger("mycellm.router").debug(f"Fleet stream to {addr} failed: {e}")
+                    continue
+
+            if not fleet_handled:
+                yield json.dumps({
+                    "id": chunk_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": body.model or "none",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "role": "assistant",
+                            "content": "[mycellm] No model available.",
+                        },
+                        "finish_reason": "stop",
+                    }],
+                })
 
         yield "[DONE]"
 
@@ -341,7 +461,7 @@ async def _route_via_fleet(
                 "top_p": body.top_p,
             }
 
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(url, json=payload, headers=headers)
                 if resp.status_code == 200:
                     data = resp.json()
@@ -358,10 +478,13 @@ async def _route_via_fleet(
                         tokens = usage.get("completion_tokens", 0)
                         from mycellm.accounting.pricing import compute_cost
                         cost = compute_cost(max(tokens, 1))
-                        await node.ledger.debit(
-                            node.peer_id, cost, "inference_consumed",
-                            counterparty_id=entry.get("peer_id", ""),
-                        )
+                        try:
+                            await node.ledger.debit(
+                                node.peer_id, cost, "inference_consumed",
+                                counterparty_id=entry.get("peer_id", ""),
+                            )
+                        except ValueError as e:
+                            logger.warning(f"Credit debit failed: {e}")
                         from mycellm.activity import EventType as _ET
                         node.activity.record(_ET.CREDIT_SPENT, amount=cost, reason="inference_consumed")
 
@@ -449,3 +572,42 @@ async def list_models(request: Request):
                 seen.add(name)
 
     return {"object": "list", "data": models}
+
+
+@router.post("/embeddings")
+async def create_embeddings(request: Request):
+    """OpenAI-compatible embeddings endpoint."""
+    from fastapi.responses import JSONResponse
+
+    node = request.app.state.node
+    body = await request.json()
+    model = body.get("model", "")
+    input_text = body.get("input", "")
+
+    model_name = node.inference.resolve_model_name(model)
+    if not model_name:
+        return JSONResponse(status_code=400, content={"error": {"message": "No model available for embeddings"}})
+
+    backend = node.inference.get_backend(model_name)
+    if not backend:
+        return JSONResponse(status_code=400, content={"error": {"message": f"Model '{model_name}' not found"}})
+
+    try:
+        from mycellm.inference.base import EmbeddingRequest
+        req = EmbeddingRequest(input=input_text, model=model_name)
+        result = await backend.embed(req)
+
+        data = []
+        for i, emb in enumerate(result.embeddings):
+            data.append({"object": "embedding", "index": i, "embedding": emb})
+
+        return {
+            "object": "list",
+            "data": data,
+            "model": model_name,
+            "usage": {"prompt_tokens": result.total_tokens, "total_tokens": result.total_tokens},
+        }
+    except NotImplementedError:
+        return JSONResponse(status_code=400, content={"error": {"message": f"Model '{model_name}' doesn't support embeddings"}})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": {"message": str(e)}})

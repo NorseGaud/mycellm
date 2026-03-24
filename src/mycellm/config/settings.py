@@ -75,9 +75,9 @@ class MycellmSettings(BaseSettings):
     config_dir: Path = Field(default_factory=_default_config_dir)
 
     # Network
-    api_host: str = "0.0.0.0"
+    api_host: str = "127.0.0.1"
     api_port: int = 8420
-    quic_host: str = "0.0.0.0"
+    quic_host: str = "127.0.0.1"
     quic_port: int = 8421
     dht_port: int = 8422
 
@@ -104,6 +104,9 @@ class MycellmSettings(BaseSettings):
 
     # Credit
     initial_credits: float = 100.0
+
+    # Quality floor
+    min_model_tier: str = ""  # Minimum model tier for this network
 
     @property
     def keys_dir(self) -> Path:
