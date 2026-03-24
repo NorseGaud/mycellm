@@ -112,7 +112,13 @@ def _get_candidates(node) -> list[tuple[str, str | None, int]]:
         tier = classify_tier(m.param_count_b)
         candidates.append((m.name, None, tier))
 
-    # Fleet nodes
+    # QUIC-connected peers (can serve inference over existing connection — NAT-friendly)
+    for entry in node.registry.connected_peers():
+        for m in entry.capabilities.models:
+            tier = classify_tier(m.param_count_b)
+            candidates.append((m.name, f"quic:{entry.peer_id}", tier))
+
+    # Fleet nodes (HTTP proxy — requires reachable api_addr)
     import time as _time
     for entry in node.node_registry.values():
         if entry.get("status") != "approved":
@@ -173,6 +179,28 @@ async def public_chat(request: Request):
                 "error": {"message": f"Message too long (max {_MAX_MESSAGE_LENGTH} chars)"}
             })
 
+    # Sensitive data guard (server-side enforcement)
+    # Bypass with X-Privacy-Override: acknowledged header (explicit opt-out)
+    privacy_override = request.headers.get("x-privacy-override", "") == "acknowledged"
+    if not privacy_override:
+        from mycellm.privacy import scan_with_policy
+        all_content = " ".join(msg.get("content", "") for msg in messages)
+        guard_result = scan_with_policy(all_content, trust_level="untrusted")
+    else:
+        guard_result = {"action": "allow", "matches": [], "highest_severity": "none"}
+    if guard_result["action"] == "block":
+        high_matches = [m for m in guard_result["matches"] if m.severity == "high"]
+        labels = [f"{m.label}: {m.pattern}" for m in high_matches[:3]]
+        return JSONResponse(status_code=422, content={
+            "error": {
+                "message": "Sensitive data detected in prompt. For privacy, this request was blocked.",
+                "type": "sensitive_data_guard",
+                "details": labels,
+                "hint": "Use a local model or private network for sensitive prompts. "
+                        "Set X-Privacy-Override: acknowledged to bypass (not recommended).",
+            }
+        })
+
     # Rate limit check
     allowed, reason = _check_rate(client_ip)
     if not allowed:
@@ -196,6 +224,47 @@ async def public_chat(request: Request):
     last_error = ""
     for model_name, fleet_addr, _tier in candidates:
         try:
+            # QUIC peer — route over existing connection (NAT-friendly)
+            if fleet_addr and fleet_addr.startswith("quic:"):
+                peer_id = fleet_addr[5:]
+                try:
+                    result = await node.route_inference(
+                        model_name, messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                    if result:
+                        text = result.get("text", "") if isinstance(result, dict) else ""
+                        prompt_tokens = result.get("prompt_tokens", 0) if isinstance(result, dict) else 0
+                        completion_tokens = result.get("completion_tokens", 0) if isinstance(result, dict) else 0
+                        latency_ms = round((time.time() - start_time) * 1000)
+                        _record_usage(client_ip, prompt_tokens + completion_tokens)
+                        node.activity.record(
+                            EventType.INFERENCE_COMPLETE,
+                            model=model_name, source="public_gateway_quic",
+                            tokens=completion_tokens, latency_ms=latency_ms,
+                        )
+                        if stream:
+                            from fastapi.responses import StreamingResponse
+                            async def _quic_stream():
+                                chunk = {
+                                    "id": request_id, "object": "chat.completion.chunk",
+                                    "model": model_name,
+                                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}],
+                                    "mycellm": {"node": _node_hash(peer_id), "latency_ms": latency_ms, "served_by": "mycellm-public"},
+                                }
+                                yield f"data: {json.dumps(chunk)}\n\n"
+                                yield "data: [DONE]\n\n"
+                            return StreamingResponse(_quic_stream(), media_type="text/event-stream",
+                                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+                        return _clean_response(request_id, model_name, text, "stop",
+                            prompt_tokens, completion_tokens, latency_ms, node_id=_node_hash(peer_id))
+                except Exception as e:
+                    last_error = str(e)
+                    logger.info(f"Gateway QUIC failover: {model_name}@{peer_id[:8]} failed: {e}")
+                    continue
+
+            # HTTP fleet proxy
             if fleet_addr:
                 if stream:
                     return await _stream_fleet(

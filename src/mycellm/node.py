@@ -39,6 +39,7 @@ from mycellm.transport.messages import (
     pong_message,
     inference_stream_chunk,
     inference_done,
+    fleet_response,
 )
 from mycellm.transport.connection import PeerConnection, PeerState
 from mycellm.transport.peer_manager import PeerManager
@@ -390,7 +391,11 @@ class MycellmNode:
             )
             logger.info(f"{styled_tag('DHT')} Peer announced: {msg.from_peer[:16]}...")
 
+        elif msg.type == MessageType.FLEET_COMMAND:
+            await self._handle_fleet_command(protocol, msg, stream_id)
+
         elif msg.type in (
+            MessageType.FLEET_RESPONSE,
             MessageType.INFERENCE_RESP,
             MessageType.INFERENCE_STREAM,
             MessageType.INFERENCE_DONE,
@@ -401,6 +406,133 @@ class MycellmNode:
             conn = self._peer_connections.get(msg.from_peer)
             if conn:
                 conn.handle_response(msg)
+
+    # ── Fleet admin command handling ──
+
+    # Allowlisted fleet commands (restricted scope — no secrets, no key changes)
+    _FLEET_COMMANDS = {
+        "node.status", "node.config",
+        "model.list", "model.load", "model.unload", "model.scope",
+    }
+
+    async def _handle_fleet_command(self, protocol, msg: MessageEnvelope, stream_id: int) -> None:
+        """Handle a fleet management command relayed via bootstrap."""
+        import hmac
+
+        command = msg.payload.get("command", "")
+        params = msg.payload.get("params", {})
+        incoming_key = msg.payload.get("fleet_admin_key", "")
+
+        # Reject if no fleet admin key configured on this node
+        if not self._settings.fleet_admin_key:
+            logger.warning(f"{styled_tag('FLEET')} Fleet command rejected: no fleet_admin_key configured")
+            reply = fleet_response(self.peer_id, msg.id, False, error="Fleet admin key not configured on this node")
+            await protocol.reply_on_stream(stream_id, reply)
+            return
+
+        # Constant-time key comparison
+        if not hmac.compare_digest(incoming_key, self._settings.fleet_admin_key):
+            logger.warning(f"{styled_tag('FLEET')} Fleet command rejected: invalid key")
+            reply = fleet_response(self.peer_id, msg.id, False, error="Invalid fleet admin key")
+            await protocol.reply_on_stream(stream_id, reply)
+            return
+
+        # Check command allowlist
+        if command not in self._FLEET_COMMANDS:
+            logger.warning(f"{styled_tag('FLEET')} Fleet command rejected: disallowed command '{command}'")
+            reply = fleet_response(self.peer_id, msg.id, False, error=f"Command not allowed: {command}")
+            await protocol.reply_on_stream(stream_id, reply)
+            return
+
+        try:
+            data = await self._execute_fleet_command(command, params)
+            reply = fleet_response(self.peer_id, msg.id, True, data=data)
+            logger.info(f"{styled_tag('FLEET')} Fleet command executed: {command}")
+        except Exception as e:
+            logger.error(f"{styled_tag('FLEET')} Fleet command failed: {command}: {e}")
+            reply = fleet_response(self.peer_id, msg.id, False, error=str(e))
+        await protocol.reply_on_stream(stream_id, reply)
+
+    async def _execute_fleet_command(self, command: str, params: dict) -> dict:
+        """Execute an allowlisted fleet command and return result data."""
+        if command == "node.status":
+            status = self.get_status()
+            status["credits"] = await self.get_credits()
+            return status
+
+        elif command == "node.config":
+            # Redacted config — no secrets, no keys
+            return {
+                "node_name": self._settings.node_name,
+                "bootstrap_peers": self._settings.bootstrap_peers,
+                "log_level": self._settings.log_level,
+                "no_log_inference": self._settings.no_log_inference,
+                "telemetry": self._settings.telemetry,
+                "max_public_requests_per_hour": self._settings.max_public_requests_per_hour,
+                "relay_backends": bool(self._settings.relay_backends),
+                "api_key_set": bool(self._settings.api_key),
+                "hf_token_set": bool(self._settings.hf_token),
+            }
+
+        elif command == "model.list":
+            models = []
+            for m in self.inference.loaded_models:
+                d = m.to_dict()
+                # Always include scope in fleet responses (to_dict omits it when "home")
+                d["scope"] = m.scope
+                models.append(d)
+            return {"models": models}
+
+        elif command == "model.load":
+            model_path = params.get("model_path", "")
+            name = params.get("name")
+            backend_type = params.get("backend", "llama.cpp")
+            if backend_type == "llama.cpp" and not model_path:
+                raise ValueError("model_path required for llama.cpp backend")
+            loaded_name = await self.inference.load_model(
+                model_path, name=name, backend_type=backend_type,
+                ctx_len=params.get("ctx_len", 4096),
+                timeout=params.get("timeout", 120),
+                api_base=params.get("api_base", ""),
+                api_key=params.get("api_key", ""),
+                api_model=params.get("api_model", ""),
+            )
+            scope = params.get("scope", "home")
+            info = self.inference._model_info.get(loaded_name)
+            if info:
+                info.scope = scope
+            self.capabilities.models = self.inference.loaded_models
+            self.capabilities.role = "seeder" if self.inference.loaded_models else "consumer"
+            await self.announce_capabilities()
+            return {"status": "loaded", "model": loaded_name}
+
+        elif command == "model.unload":
+            model_name = params.get("model", "")
+            if not model_name:
+                raise ValueError("model name required")
+            await self.inference.unload_model(model_name)
+            self.capabilities.models = self.inference.loaded_models
+            self.capabilities.role = "seeder" if self.inference.loaded_models else "consumer"
+            await self.announce_capabilities()
+            return {"status": "unloaded", "model": model_name}
+
+        elif command == "model.scope":
+            model_name = params.get("model", "")
+            scope = params.get("scope", "home")
+            if not model_name:
+                raise ValueError("model name required")
+            if scope not in ("home", "public"):
+                raise ValueError("scope must be 'home' or 'public'")
+            info = self.inference._model_info.get(model_name)
+            if not info:
+                raise ValueError(f"Model not found: {model_name}")
+            info.scope = scope
+            self.capabilities.models = self.inference.loaded_models
+            self.capabilities.role = "seeder" if self.inference.loaded_models else "consumer"
+            await self.announce_capabilities()
+            return {"status": "updated", "model": model_name, "scope": scope}
+
+        raise ValueError(f"Unknown command: {command}")
 
     def _resolve_peer_trust(self, peer_id: str) -> str:
         """Determine the highest trust level for a peer based on shared networks.
@@ -548,15 +680,10 @@ class MycellmNode:
                 from mycellm.accounting.pricing import compute_reward
                 reward = compute_reward(max(tokens, 1))
 
-                if self.receipt_validator.check_credit_rate(self.peer_id):
-                    await self.ledger.credit(self.peer_id, reward, "inference_served",
-                                             counterparty_id=msg.from_peer)
-                else:
-                    logger.warning(f"Credit rate limit reached, skipping self-credit")
-
-                # Send signed credit receipt to consumer (with request_id binding)
+                # Generate signed receipt
+                sig = ""
+                ts = time.time()
                 if not stream:
-                    ts = time.time()
                     receipt_data = build_receipt_data(
                         consumer_id=msg.from_peer,
                         seeder_id=self.peer_id,
@@ -567,6 +694,16 @@ class MycellmNode:
                         timestamp=ts,
                     )
                     sig = sign_receipt(self.device_key, receipt_data)
+
+                if self.receipt_validator.check_credit_rate(self.peer_id):
+                    await self.ledger.credit(self.peer_id, reward, "inference_served",
+                                             counterparty_id=msg.from_peer,
+                                             receipt_signature=sig)
+                else:
+                    logger.warning(f"Credit rate limit reached, skipping self-credit")
+
+                # Send signed receipt to consumer
+                if sig:
                     from mycellm.transport.messages import signed_credit_receipt
                     receipt_msg = signed_credit_receipt(
                         self.peer_id, msg.from_peer, self.peer_id,
@@ -794,6 +931,7 @@ class MycellmNode:
             restored = await self.inference.restore_models(self._settings.data_dir)
             if restored:
                 self.capabilities.models = self.inference.loaded_models
+                self.capabilities.role = "seeder" if self.inference.loaded_models else "consumer"
                 logger.info(f"{styled_tag('BOOT')} Restored {restored} model(s)")
                 await self.announce_capabilities()
         except Exception as e:
@@ -814,6 +952,7 @@ class MycellmNode:
                     logger.warning(f"{styled_tag('RELAY')} Failed to add {url}: {e}")
             if relay_urls and self.relay_manager.relays:
                 self.capabilities.models = self.inference.loaded_models
+                self.capabilities.role = "seeder" if self.inference.loaded_models else "consumer"
                 await self.announce_capabilities()
                 self.relay_manager.start_polling(interval=60)
         except Exception as e:
@@ -882,7 +1021,7 @@ class MycellmNode:
         self.capabilities = Capabilities(
             models=self.inference.loaded_models,
             hardware=hw,
-            role=self.device_cert.role if self.device_cert else "seeder",
+            role="seeder" if self.inference.loaded_models else "consumer",
             version="0.1.0",
             network_ids=self.federation.network_ids if self.federation else [],
         )
@@ -905,9 +1044,10 @@ class MycellmNode:
         if self.enable_dht:
             await self._start_dht()
 
-        # Connect to bootstrap peers via PeerManager
-        peers = self._settings.get_bootstrap_list()
-        await self.peer_manager.start(peers)
+        # Connect to bootstrap peers via PeerManager (QUIC on port 8421)
+        raw_peers = self._settings.get_bootstrap_list()
+        quic_peers = [(h, 8421 if p == 8420 else p) for h, p in raw_peers]
+        await self.peer_manager.start(quic_peers)
 
         # Announce to bootstrap nodes via HTTP
         self._announce_task = asyncio.create_task(self._announce_to_bootstrap())
@@ -951,23 +1091,24 @@ class MycellmNode:
             headers["Authorization"] = f"Bearer {self._settings.api_key}"
 
         sys_info = self.get_system_info()
-        payload = {
+        # Public name: peer_id prefix, not hostname (privacy + dedup)
+        public_name = f"node-{self.peer_id[:8]}"
+
+        base_payload = {
             "peer_id": self.peer_id,
-            "node_name": self._settings.node_name,
             "api_addr": f"{self.api_host}:{self.api_port}",
             "role": self.capabilities.role,
-            "capabilities": self.capabilities.to_dict(),
             "system": sys_info,
         }
         if self._settings.external_host:
-            payload["external_host"] = self._settings.external_host
+            base_payload["external_host"] = self._settings.external_host
 
         async def _do_announce():
-            payload["capabilities"] = self.capabilities.to_dict()
+            base_payload["capabilities"] = self.capabilities.to_dict()
             # Include telemetry if opted in
             if self._settings.telemetry:
                 stats = self.activity.stats() if hasattr(self, "activity") else {}
-                payload["telemetry"] = {
+                base_payload["telemetry"] = {
                     "requests_total": stats.get("total_requests", 0),
                     "tokens_total": stats.get("total_tokens", 0),
                     "tps": self.activity.tps if hasattr(self, "activity") else 0,
@@ -975,24 +1116,40 @@ class MycellmNode:
                     "uptime_seconds": round(self.uptime),
                     "credits_earned": stats.get("credits_earned", 0),
                 }
+            any_ok = False
             for host, port in peers:
-                api_port = port - 1
-                url = f"http://{host}:{api_port}/v1/admin/nodes/announce"
+                # LAN IPs: use http://host:api_port, send real hostname
+                # Public domains: use https://host, send anonymized name
+                is_lan = host.startswith("10.") or host.startswith("192.168.") or host.startswith("172.") or host.startswith("127.") or host == "localhost"
+                payload = {**base_payload}
+                if is_lan:
+                    api_port = port if port != 8421 else 8420
+                    url = f"http://{host}:{api_port}/v1/admin/nodes/announce"
+                    payload["node_name"] = self._settings.node_name
+                    payload["system"] = sys_info
+                else:
+                    url = f"https://{host}/v1/admin/nodes/announce"
+                    payload["node_name"] = public_name
+                    # Public: only share GPU type + model count, not full system info
+                    payload["system"] = {
+                        "gpu": sys_info.get("gpu", {}),
+                    }
                 try:
                     transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
                     async with httpx.AsyncClient(timeout=10, transport=transport) as client:
                         resp = await client.post(url, json=payload, headers=headers)
                         if resp.status_code == 200:
-                            logger.info(f"{styled_tag('NODE')} Announced to bootstrap {host}:{api_port}")
-                            self.activity.record(EventType.ANNOUNCE_OK, bootstrap=f"{host}:{api_port}")
-                            return True
+                            logger.info(f"{styled_tag('NODE')} Announced to bootstrap {url}")
+                            self.activity.record(EventType.ANNOUNCE_OK, bootstrap=url)
+                            any_ok = True
                         elif resp.status_code == 401:
-                            logger.warning(f"{styled_tag('SECURITY')} Bootstrap rejected announce (bad API key)")
-                            self.activity.record(EventType.ANNOUNCE_FAILED, bootstrap=f"{host}:{api_port}", reason="auth_rejected")
+                            logger.warning(f"{styled_tag('SECURITY')} Bootstrap {url} rejected announce (bad API key)")
+                        else:
+                            logger.warning(f"{styled_tag('NODE')} Announce to {url}: HTTP {resp.status_code}")
                 except Exception as e:
-                    logger.warning(f"{styled_tag('NODE')} Announce to {host}:{api_port} failed: {e}")
-                    self.activity.record(EventType.ANNOUNCE_FAILED, bootstrap=f"{host}:{api_port}", reason=str(e))
-            return False
+                    logger.warning(f"{styled_tag('NODE')} Announce to {url} failed: {e}")
+                    self.activity.record(EventType.ANNOUNCE_FAILED, bootstrap=url, reason=str(e))
+            return any_ok
 
         # Initial announce
         await _do_announce()

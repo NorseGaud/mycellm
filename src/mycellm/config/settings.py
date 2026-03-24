@@ -139,8 +139,15 @@ class MycellmSettings(BaseSettings):
     # When true, prompt/response content is never written to disk or logs
     no_log_inference: bool = True
 
+    # Fleet throttle — max public requests this node will serve per hour (0 = unlimited)
+    max_public_requests_per_hour: int = 0
+
     # Quality floor
     min_model_tier: str = ""  # Minimum model tier for this network
+
+    # Fleet admin key — opt-in remote fleet management via QUIC relay
+    # When set, allows a fleet admin to manage this node through the bootstrap
+    fleet_admin_key: str = ""  # MYCELLM_FLEET_ADMIN_KEY env var
 
     @property
     def keys_dir(self) -> Path:
