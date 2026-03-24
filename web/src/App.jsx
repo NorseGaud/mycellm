@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react'
+import React, { useState, useEffect, useRef, useCallback, useMemo, createContext, useContext } from 'react'
 import {
   Terminal, Activity, Server, Globe, Cpu, Database, Zap, Shield, Key,
   Send, Plus, Trash2, RefreshCw, MessageSquare, BarChart3, Network,
   Boxes, ChevronRight, Loader2, AlertCircle, Check, X, Eye, EyeOff,
   Radio, MonitorSmartphone, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown,
+  Wifi, WifiOff, Clock, TrendingUp, Heart, Gauge,
 } from 'lucide-react'
 
 // ── Constants ──
@@ -40,6 +41,283 @@ function tagColor(name) {
     if (name.startsWith(prefix)) return color
   }
   return 'text-gray-400'
+}
+
+// ── Network Canvas (replaces SporeBackground) ──
+
+function NetworkCanvas({ selfNode, peers, fleetNodes, activityEvents }) {
+  const canvasRef = useRef(null)
+  const nodesRef = useRef([])
+  const particlesRef = useRef([])
+  const frameRef = useRef(null)
+
+  // Build node list from real data
+  useEffect(() => {
+    const nodes = []
+
+    // Self node at center
+    nodes.push({
+      id: 'self',
+      label: selfNode?.node_name || 'self',
+      role: 'bootstrap',
+      x: 0, y: 0,
+      vx: 0, vy: 0,
+      r: 6,
+      color: '#22C55E', // spore
+      models: selfNode?.models?.length || 0,
+      fixed: true,
+      pulse: 0,
+    })
+
+    // QUIC peers
+    for (const p of (peers || [])) {
+      const existing = nodesRef.current.find(n => n.id === p.peer_id)
+      nodes.push({
+        id: p.peer_id || `peer-${Math.random()}`,
+        label: (p.peer_id || '').slice(0, 8),
+        role: p.role || 'seeder',
+        x: existing?.x || (Math.random() - 0.5) * 300,
+        y: existing?.y || (Math.random() - 0.5) * 200,
+        vx: 0, vy: 0,
+        r: 4,
+        color: p.status === 'routable' ? '#3B82F6' : '#666',
+        models: p.models?.length || 0,
+        connectedTo: 'self',
+        pulse: 0,
+      })
+    }
+
+    // Fleet nodes
+    for (const f of (fleetNodes || [])) {
+      if (f.status !== 'approved') continue
+      const existing = nodesRef.current.find(n => n.id === f.peer_id)
+      nodes.push({
+        id: f.peer_id || f.node_name || `fleet-${Math.random()}`,
+        label: f.node_name || (f.peer_id || '').slice(0, 8),
+        role: f.capabilities?.role || 'seeder',
+        x: existing?.x || (Math.random() - 0.5) * 400,
+        y: existing?.y || (Math.random() - 0.5) * 300,
+        vx: 0, vy: 0,
+        r: 4,
+        color: '#FACC15', // ledger (fleet = gold)
+        models: (f.capabilities?.models || []).length,
+        connectedTo: 'self',
+        pulse: 0,
+      })
+    }
+
+    nodesRef.current = nodes
+  }, [selfNode, peers, fleetNodes])
+
+  // Spawn particles on activity events
+  useEffect(() => {
+    if (!activityEvents || activityEvents.length === 0) return
+    const latest = activityEvents[activityEvents.length - 1]
+    if (!latest) return
+
+    // Pulse self node on any activity
+    const self = nodesRef.current.find(n => n.id === 'self')
+    if (self) self.pulse = 1.0
+
+    // Find target node and spawn particle
+    const routedTo = latest.routed_to || latest.peer_id || latest.peer || ''
+    if (routedTo) {
+      const target = nodesRef.current.find(n => n.id === routedTo || n.label === routedTo.slice(0, 8))
+      if (target) {
+        target.pulse = 1.0
+        if (self) {
+          particlesRef.current.push({
+            x: self.x, y: self.y,
+            tx: target.x, ty: target.y,
+            progress: 0,
+            speed: 0.03,
+            color: latest.type?.includes('credit') ? '#FACC15' : '#EF4444',
+          })
+        }
+      }
+    }
+  }, [activityEvents?.length])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+
+    const resize = () => {
+      canvas.width = window.innerWidth
+      canvas.height = window.innerHeight
+    }
+    resize()
+    window.addEventListener('resize', resize)
+
+    function draw() {
+      const w = canvas.width
+      const h = canvas.height
+      const cx = w / 2
+      const cy = h / 2
+      ctx.clearRect(0, 0, w, h)
+
+      const nodes = nodesRef.current
+      if (nodes.length === 0) {
+        frameRef.current = requestAnimationFrame(draw)
+        return
+      }
+
+      // Simple force-directed layout
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i].fixed) continue
+        for (let j = 0; j < nodes.length; j++) {
+          if (i === j) continue
+          const dx = nodes[i].x - nodes[j].x
+          const dy = nodes[i].y - nodes[j].y
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1
+
+          // Repulsion
+          const repulse = 5000 / (dist * dist)
+          nodes[i].vx += (dx / dist) * repulse * 0.01
+          nodes[i].vy += (dy / dist) * repulse * 0.01
+        }
+
+        // Attraction to connected node
+        if (nodes[i].connectedTo) {
+          const target = nodes.find(n => n.id === nodes[i].connectedTo)
+          if (target) {
+            const dx = target.x - nodes[i].x
+            const dy = target.y - nodes[i].y
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1
+            const attract = (dist - 150) * 0.001
+            nodes[i].vx += (dx / dist) * attract
+            nodes[i].vy += (dy / dist) * attract
+          }
+        }
+
+        // Damping + boundary
+        nodes[i].vx *= 0.9
+        nodes[i].vy *= 0.9
+        nodes[i].x += nodes[i].vx
+        nodes[i].y += nodes[i].vy
+        nodes[i].x = Math.max(-w * 0.4, Math.min(w * 0.4, nodes[i].x))
+        nodes[i].y = Math.max(-h * 0.35, Math.min(h * 0.35, nodes[i].y))
+      }
+
+      // Draw connections
+      for (const node of nodes) {
+        if (!node.connectedTo) continue
+        const target = nodes.find(n => n.id === node.connectedTo)
+        if (!target) continue
+
+        const alpha = 0.08 + Math.max(node.pulse, target.pulse) * 0.15
+        ctx.beginPath()
+        ctx.moveTo(cx + node.x, cy + node.y)
+        ctx.lineTo(cx + target.x, cy + target.y)
+        ctx.strokeStyle = `rgba(34, 197, 94, ${alpha})`
+        ctx.lineWidth = 0.8
+        ctx.stroke()
+      }
+
+      // Draw particles (traveling along connections)
+      const particles = particlesRef.current
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i]
+        p.progress += p.speed
+        if (p.progress >= 1) {
+          particles.splice(i, 1)
+          continue
+        }
+        const px = cx + p.x + (p.tx - p.x) * p.progress
+        const py = cy + p.y + (p.ty - p.y) * p.progress
+        ctx.beginPath()
+        ctx.arc(px, py, 2, 0, Math.PI * 2)
+        ctx.fillStyle = p.color
+        ctx.globalAlpha = 1 - p.progress * 0.5
+        ctx.fill()
+        ctx.globalAlpha = 1
+      }
+
+      // Draw nodes
+      for (const node of nodes) {
+        const nx = cx + node.x
+        const ny = cy + node.y
+
+        // Pulse decay
+        if (node.pulse > 0) node.pulse *= 0.95
+
+        // Glow on pulse
+        if (node.pulse > 0.1) {
+          ctx.beginPath()
+          ctx.arc(nx, ny, node.r + 8 * node.pulse, 0, Math.PI * 2)
+          ctx.fillStyle = `rgba(34, 197, 94, ${node.pulse * 0.2})`
+          ctx.fill()
+        }
+
+        // Node circle
+        ctx.beginPath()
+        ctx.arc(nx, ny, node.r, 0, Math.PI * 2)
+        ctx.fillStyle = node.color
+        ctx.globalAlpha = 0.15 + node.pulse * 0.5
+        ctx.fill()
+        ctx.globalAlpha = 1
+
+        // Border
+        ctx.beginPath()
+        ctx.arc(nx, ny, node.r, 0, Math.PI * 2)
+        ctx.strokeStyle = node.color
+        ctx.lineWidth = 1
+        ctx.globalAlpha = 0.3 + node.pulse * 0.5
+        ctx.stroke()
+        ctx.globalAlpha = 1
+
+        // Label (only if enough nodes to be useful)
+        if (nodes.length > 1) {
+          ctx.font = '9px JetBrains Mono, monospace'
+          ctx.fillStyle = `rgba(229, 229, 229, ${0.15 + node.pulse * 0.3})`
+          ctx.textAlign = 'center'
+          ctx.fillText(node.label, nx, ny + node.r + 12)
+        }
+      }
+
+      // Ambient spores (decorative, fewer than before)
+      if (!draw._ambientSpores) {
+        draw._ambientSpores = Array.from({ length: 15 }, () => ({
+          x: Math.random() * w,
+          y: Math.random() * h,
+          vx: (Math.random() - 0.5) * 0.15,
+          vy: (Math.random() - 0.5) * 0.15,
+          r: Math.random() * 1.2 + 0.3,
+          phase: Math.random() * Math.PI * 2,
+        }))
+      }
+      const now = Date.now() * 0.001
+      for (const s of draw._ambientSpores) {
+        s.x += s.vx
+        s.y += s.vy
+        if (s.x < 0) s.x = w
+        if (s.x > w) s.x = 0
+        if (s.y < 0) s.y = h
+        if (s.y > h) s.y = 0
+        const pulse = Math.sin(now + s.phase) * 0.3 + 0.7
+        ctx.beginPath()
+        ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2)
+        ctx.fillStyle = `rgba(34, 197, 94, ${0.04 * pulse})`
+        ctx.fill()
+      }
+
+      frameRef.current = requestAnimationFrame(draw)
+    }
+
+    frameRef.current = requestAnimationFrame(draw)
+    return () => {
+      window.removeEventListener('resize', resize)
+      if (frameRef.current) cancelAnimationFrame(frameRef.current)
+    }
+  }, [])
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="fixed inset-0 pointer-events-none z-0"
+    />
+  )
 }
 
 // ── API key management ──
@@ -313,27 +591,518 @@ function SystemInfoPanel({ sysInfo, compact = false }) {
   )
 }
 
+// ── Helpers ──
+
+function formatUptime(seconds) {
+  if (!seconds || seconds <= 0) return '0s'
+  const d = Math.floor(seconds / 86400)
+  const h = Math.floor((seconds % 86400) / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
+function connectionStateColor(state) {
+  switch (state) {
+    case 'routable': return 'text-spore'
+    case 'connecting': case 'handshaking': return 'text-ledger'
+    case 'disconnected': return 'text-compute'
+    default: return 'text-gray-500'
+  }
+}
+
+function connectionStateDot(state) {
+  switch (state) {
+    case 'routable': return 'bg-spore'
+    case 'connecting': case 'handshaking': return 'bg-ledger animate-pulse'
+    case 'disconnected': return 'bg-compute'
+    default: return 'bg-gray-600'
+  }
+}
+
+// ── Network Health Bar ──
+
+function NetworkHealthBar({ connections, peers, fleetNodes }) {
+  const routableConns = connections.filter(c => c.state === 'routable').length
+  const totalConns = connections.length
+  const approvedFleet = fleetNodes.filter(n => n.status === 'approved').length
+  const totalFleet = fleetNodes.length
+  const totalPeers = peers.length
+
+  // Adaptive health: use whatever connectivity data is available
+  const hasConnections = totalConns > 0
+  const hasFleet = totalFleet > 0
+  const hasPeers = totalPeers > 0
+
+  let score = 0
+  let weights = 0
+
+  if (hasConnections) {
+    score += (routableConns / totalConns) * 50
+    weights += 50
+  }
+  if (hasFleet) {
+    score += (approvedFleet / Math.max(totalFleet, 1)) * 40
+    weights += 40
+  }
+  if (hasPeers) {
+    score += 30 // peers exist = good
+    weights += 30
+  }
+
+  // If nothing is connected, base score on whether we have local models
+  if (weights === 0) {
+    score = 20 // node is alive but isolated
+    weights = 100
+  } else {
+    score = Math.round((score / weights) * 100)
+  }
+
+  const barColor = score >= 70 ? 'bg-spore' : score >= 40 ? 'bg-ledger' : 'bg-compute'
+  const label = score >= 70 ? 'Healthy' : score >= 40 ? 'Degraded' : score > 0 ? 'Limited' : 'Offline'
+  const labelColor = score >= 70 ? 'text-spore' : score >= 40 ? 'text-ledger' : 'text-compute'
+
+  // Build status summary
+  const parts = []
+  if (hasConnections) parts.push(`${routableConns}/${totalConns} QUIC`)
+  if (hasFleet) parts.push(`${approvedFleet}/${totalFleet} fleet`)
+  if (hasPeers) parts.push(`${totalPeers} peers`)
+  if (parts.length === 0) parts.push('No connections')
+
+  return (
+    <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest flex items-center space-x-2">
+          <Heart size={12} />
+          <span>Network Health</span>
+        </h2>
+        <div className="flex items-center space-x-2">
+          <span className={`font-mono text-2xl font-bold ${labelColor}`}>{score}</span>
+          <span className={`text-xs ${labelColor}`}>{label}</span>
+        </div>
+      </div>
+      <div className="w-full bg-void rounded-full h-2 overflow-hidden border border-white/5">
+        <div className={`h-full ${barColor} transition-all duration-500`} style={{ width: `${score}%` }} />
+      </div>
+      <div className="flex justify-between mt-3 text-xs text-gray-500">
+        {parts.map((p, i) => <span key={i}>{p}</span>)}
+      </div>
+    </div>
+  )
+}
+
+// ── Sparkline & Activity Feed ──
+
+function Sparkline({ data, color = '#22C55E', height = 32, width = 120 }) {
+  if (!data || data.length === 0) return <div style={{ width, height }} />
+  const max = Math.max(...data, 1)
+  const points = data.map((v, i) => {
+    const x = (i / Math.max(data.length - 1, 1)) * width
+    const y = height - (v / max) * (height - 4) - 2
+    return `${x},${y}`
+  }).join(' ')
+
+  return (
+    <svg width={width} height={height} className="opacity-80">
+      <polyline
+        points={points}
+        fill="none"
+        stroke={color}
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function ActivityFeed({ events }) {
+  const endRef = useRef(null)
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [events])
+
+  const typeColors = {
+    inference_complete: 'text-compute',
+    inference_start: 'text-compute/50',
+    inference_failed: 'text-red-400',
+    route_decision: 'text-relay',
+    peer_connected: 'text-spore',
+    peer_disconnected: 'text-gray-500',
+    model_loaded: 'text-spore',
+    model_unloaded: 'text-gray-500',
+    credit_earned: 'text-ledger',
+    credit_spent: 'text-ledger/70',
+    announce_ok: 'text-spore/50',
+    announce_failed: 'text-compute/50',
+    fleet_node_joined: 'text-relay',
+  }
+
+  const typeIcons = {
+    inference_complete: '\u26A1',
+    inference_start: '\u2192',
+    inference_failed: '\u2717',
+    route_decision: '\u2197',
+    peer_connected: '\u25CF',
+    peer_disconnected: '\u25CB',
+    model_loaded: '+',
+    model_unloaded: '\u2212',
+    credit_earned: '\u2191',
+    credit_spent: '\u2193',
+    announce_ok: '\uD83D\uDCE1',
+    announce_failed: '\u26A0',
+    fleet_node_joined: '\uD83C\uDF10',
+  }
+
+  function eventLabel(e) {
+    switch (e.type) {
+      case 'inference_complete':
+        return `${e.model || '?'} \u2192 ${e.source || '?'} (${e.tokens || 0} tok, ${e.latency_ms ? e.latency_ms + 'ms' : '?'})`
+      case 'inference_failed':
+        return `${e.model || '?'} failed: ${e.error || 'unknown'}`
+      case 'route_decision':
+        return `Routed ${e.model || '?'} \u2192 ${(e.routed_to || '').slice(0, 12) || e.target || '?'}`
+      case 'peer_connected':
+        return `Peer ${(e.peer_id || '').slice(0, 12)}... (${e.role || 'unknown'})`
+      case 'peer_disconnected':
+        return `Peer ${(e.peer_id || '').slice(0, 12)}... disconnected`
+      case 'model_loaded':
+        return `Loaded ${e.model || '?'} (${e.backend || '?'})`
+      case 'model_unloaded':
+        return `Unloaded ${e.model || '?'}`
+      case 'credit_earned':
+        return `+${(e.amount || 0).toFixed(4)} from ${(e.peer || '').slice(0, 12) || 'local'}`
+      case 'credit_spent':
+        return `-${(e.amount || 0).toFixed(4)} to ${(e.peer || '').slice(0, 12) || 'network'}`
+      case 'announce_ok':
+        return `Announced to ${e.target || 'bootstrap'}`
+      case 'announce_failed':
+        return `Announce failed: ${e.target || 'bootstrap'}`
+      case 'fleet_node_joined':
+        return `${e.node_name || 'node'} joined fleet`
+      default:
+        return e.type.replace(/_/g, ' ')
+    }
+  }
+
+  return (
+    <div className="space-y-1 max-h-[250px] overflow-y-auto custom-scrollbar text-xs font-mono">
+      {events.length === 0 && (
+        <div className="text-gray-600 text-center py-4">No activity yet. Send an inference request to see events.</div>
+      )}
+      {events.map((e, i) => (
+        <div key={i} className="flex items-center space-x-2 py-1 hover:bg-white/[0.02] rounded px-1">
+          <span className="text-gray-600 w-14 shrink-0">{e.time || ''}</span>
+          <span className={`w-4 shrink-0 ${typeColors[e.type] || 'text-gray-500'}`}>
+            {typeIcons[e.type] || '\u00B7'}
+          </span>
+          <span className={typeColors[e.type] || 'text-gray-400'}>
+            {eventLabel(e)}
+          </span>
+        </div>
+      ))}
+      <div ref={endRef} />
+    </div>
+  )
+}
+
+// ── Network Topology (structured node view) ──
+
+function NetworkTopology({ status, fleetNodes, onNodeClick }) {
+  const peers = status?.peers || []
+  const allNodes = [
+    { id: 'self', name: status?.node_name || 'This node', role: 'bootstrap', status: 'online', models: status?.models || [], type: 'self' },
+    ...peers.map(p => ({
+      id: p.peer_id, name: (p.peer_id || '').slice(0, 12) + '...', role: p.role,
+      status: p.status, models: p.models || [], type: 'quic',
+    })),
+    ...(fleetNodes || []).filter(f => f.status === 'approved').map(f => ({
+      id: f.peer_id || f.node_name, name: f.node_name || (f.peer_id || '').slice(0, 12),
+      role: f.capabilities?.role || 'seeder', status: 'fleet',
+      models: (f.capabilities?.models || []).map(m => m.name || m),
+      type: 'fleet', system: f.system,
+    })),
+  ]
+
+  const roleIcons = { bootstrap: '\u{1F451}', seeder: '\u{1F5A5}\uFE0F', consumer: '\u{1F4BB}', relay: '\u{1F500}' }
+  const statusColors = {
+    online: 'border-spore', routable: 'border-spore', fleet: 'border-ledger',
+    disconnected: 'border-compute', discovered: 'border-gray-600',
+  }
+  const statusDots = {
+    online: 'bg-spore', routable: 'bg-spore', fleet: 'bg-ledger',
+    disconnected: 'bg-compute', discovered: 'bg-gray-600',
+  }
+
+  if (allNodes.length <= 1) return null
+
+  return (
+    <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+      <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4 flex items-center space-x-2">
+        <Network size={12} />
+        <span>Topology ({allNodes.length} nodes)</span>
+      </h2>
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+        {allNodes.map((node) => (
+          <button key={node.id}
+            onClick={() => onNodeClick?.(node)}
+            className={`text-left bg-black border ${statusColors[node.status] || 'border-white/10'} rounded-lg p-3 hover:bg-white/[0.03] transition-colors`}>
+            <div className="flex items-center space-x-2 mb-2">
+              <span className="text-sm">{roleIcons[node.role] || '\u{1F5A5}\uFE0F'}</span>
+              <span className="font-mono text-xs text-white truncate">{node.name}</span>
+              <div className={`w-2 h-2 rounded-full ml-auto ${statusDots[node.status] || 'bg-gray-600'}`} />
+            </div>
+            <div className="text-xs text-gray-500">
+              {node.models.length > 0 ? (
+                <span>{node.models.length} model{node.models.length !== 1 ? 's' : ''}</span>
+              ) : (
+                <span className="text-gray-600">no models</span>
+              )}
+              <span className="mx-1">&middot;</span>
+              <span className={node.type === 'self' ? 'text-spore' : node.type === 'fleet' ? 'text-ledger' : 'text-relay'}>
+                {node.type}
+              </span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── Node Detail Panel (click-to-inspect) ──
+
+function NodeDetailPanel({ node, onClose }) {
+  if (!node) return null
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="bg-[#111] border border-white/10 rounded-xl p-6 max-w-lg w-full mx-4 shadow-2xl">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center space-x-3">
+            <span className="text-xl">{node.role === 'bootstrap' ? '\u{1F451}' : '\u{1F5A5}\uFE0F'}</span>
+            <div>
+              <h3 className="text-white font-mono font-bold">{node.name}</h3>
+              <p className="text-xs text-gray-500">{node.id === 'self' ? 'This node' : node.id}</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="text-gray-500 hover:text-white">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3 text-sm">
+            <div className="bg-black rounded-lg p-3">
+              <div className="text-xs text-gray-500">Role</div>
+              <div className="text-white mt-1">{node.role}</div>
+            </div>
+            <div className="bg-black rounded-lg p-3">
+              <div className="text-xs text-gray-500">Status</div>
+              <div className={`mt-1 ${node.status === 'routable' || node.status === 'online' ? 'text-spore' : node.status === 'fleet' ? 'text-ledger' : 'text-compute'}`}>
+                {node.status}
+              </div>
+            </div>
+            <div className="bg-black rounded-lg p-3">
+              <div className="text-xs text-gray-500">Transport</div>
+              <div className="text-white mt-1">{node.type}</div>
+            </div>
+            <div className="bg-black rounded-lg p-3">
+              <div className="text-xs text-gray-500">Models</div>
+              <div className="text-white mt-1">{node.models?.length || 0}</div>
+            </div>
+          </div>
+
+          {node.models && node.models.length > 0 && (
+            <div className="bg-black rounded-lg p-3">
+              <div className="text-xs text-gray-500 mb-2">Available Models</div>
+              <div className="flex flex-wrap gap-1">
+                {node.models.map((m, i) => (
+                  <span key={i} className="bg-white/5 text-xs text-gray-300 px-2 py-0.5 rounded font-mono">
+                    {typeof m === 'string' ? m : m.name || m}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {node.system && (
+            <div className="bg-black rounded-lg p-3">
+              <div className="text-xs text-gray-500 mb-2">Hardware</div>
+              <div className="grid grid-cols-2 gap-2 text-xs text-gray-400">
+                {node.system.cpu?.name && <div>CPU: {node.system.cpu.name}</div>}
+                {node.system.memory?.total_gb && <div>RAM: {node.system.memory.total_gb}GB</div>}
+                {node.system.gpu?.gpu && node.system.gpu.gpu !== 'CPU' && <div>GPU: {node.system.gpu.gpu}</div>}
+                {node.system.os?.hostname && <div>Host: {node.system.os.hostname}</div>}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Overview Tab ──
 
-function OverviewTab({ status, credits }) {
+function OverviewTab({ status, credits, fleetNodes }) {
   const [sysInfo, setSysInfo] = useState(null)
+  const [connections, setConnections] = useState([])
+  const [activity, setActivity] = useState({ events: [], stats: {}, sparklines: {} })
+  const [liveEvents, setLiveEvents] = useState([])
+  const [selectedNode, setSelectedNode] = useState(null)
   const peers = status?.peers || []
   const models = status?.models || []
+  const uptime = status?.uptime_seconds || 0
 
   useEffect(() => {
     api('/v1/node/system').then(setSysInfo).catch(() => {})
   }, [])
 
+  // Poll connections
+  useEffect(() => {
+    const fetch_ = () => api('/v1/node/connections').then(d => setConnections(d.connections || [])).catch(() => {})
+    fetch_()
+    const iv = setInterval(fetch_, 5000)
+    return () => clearInterval(iv)
+  }, [])
+
+  // Poll activity
+  useEffect(() => {
+    const fetch_ = () => api('/v1/node/activity?limit=100').then(setActivity).catch(() => {})
+    fetch_()
+    const iv = setInterval(fetch_, 3000)
+    return () => clearInterval(iv)
+  }, [])
+
+  // SSE activity stream
+  useEffect(() => {
+    const es = new EventSource('/v1/node/activity/stream')
+    es.onmessage = (event) => {
+      try {
+        const e = JSON.parse(event.data)
+        setLiveEvents(prev => {
+          const next = [...prev, e]
+          return next.length > 200 ? next.slice(-200) : next
+        })
+      } catch {}
+    }
+    return () => es.close()
+  }, [])
+
+  const allEvents = [...(activity.events || []), ...liveEvents]
+  const stats = activity.stats || {}
+  const sparklines = activity.sparklines || {}
+  const routableConns = connections.filter(c => c.state === 'routable')
+  const networkModels = new Set()
+  for (const p of peers) {
+    for (const m of (p.models || [])) networkModels.add(m)
+  }
+
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard label="Connected Peers" value={peers.length} icon={Activity} color="text-relay" />
-        <StatCard label="Loaded Models" value={models.length} icon={Boxes} color="text-spore" />
-        <StatCard label="Credit Balance" value={credits.balance?.toFixed(2)} icon={Key} color="text-ledger"
-          sub={`+${credits.earned?.toFixed(2) || '0.00'} / -${credits.spent?.toFixed(2) || '0.00'}`} />
-        <StatCard label="Active Inference" value={`${status?.inference?.active || 0}/${status?.inference?.max_concurrent || 2}`}
-          icon={Zap} color="text-compute" />
+      {/* Top stat cards with sparklines */}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+        <StatCard label="Uptime" value={formatUptime(uptime)} icon={Clock} color="text-gray-300" />
+        <div className="border p-5 rounded-xl border-white/10 bg-[#111]">
+          <h3 className="font-mono text-xs text-gray-500 mb-1">Requests</h3>
+          <div className="flex items-end justify-between">
+            <div>
+              <span className="text-2xl font-mono text-compute">{stats.total_requests || 0}</span>
+              <div className="text-xs text-gray-500 mt-0.5">{stats.requests_per_min || 0}/min</div>
+            </div>
+            <Sparkline data={sparklines.requests || []} color="#EF4444" height={28} width={80} />
+          </div>
+        </div>
+        <div className="border p-5 rounded-xl border-white/10 bg-[#111]">
+          <h3 className="font-mono text-xs text-gray-500 mb-1">Tokens</h3>
+          <div className="flex items-end justify-between">
+            <div>
+              <span className="text-2xl font-mono text-poison">{stats.total_tokens || 0}</span>
+              <div className="text-xs text-gray-500 mt-0.5">{stats.tokens_per_min || 0}/min</div>
+            </div>
+            <Sparkline data={sparklines.tokens || []} color="#A855F7" height={28} width={80} />
+          </div>
+        </div>
+        <StatCard label="Models" value={models.length} icon={Boxes} color="text-spore"
+          sub={networkModels.size > 0 ? `+${networkModels.size} on network` : 'local only'} />
+        <StatCard label="Inference" value={`${status?.inference?.active || 0}/${status?.inference?.max_concurrent || 2}`}
+          icon={Zap} color="text-compute"
+          highlight={status?.inference?.active > 0} />
       </div>
+
+      {/* Network Health */}
+      <NetworkHealthBar connections={connections} peers={peers} fleetNodes={fleetNodes || []} />
+
+      {/* Network Topology */}
+      <NetworkTopology status={status} fleetNodes={fleetNodes} onNodeClick={setSelectedNode} />
+      {selectedNode && <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNode(null)} />}
+
+      {/* Activity Feed */}
+      <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+        <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-3 flex items-center space-x-2">
+          <Activity size={12} />
+          <span>Activity Feed</span>
+          {stats.requests_per_min > 0 && (
+            <span className="text-compute animate-pulse ml-2">● {stats.requests_per_min}/min</span>
+          )}
+        </h2>
+        <ActivityFeed events={allEvents.slice(-100)} />
+      </div>
+
+      {/* Connection Diagnostics */}
+      {connections.length > 0 && (
+        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4 flex items-center space-x-2">
+            <Gauge size={12} />
+            <span>Connections ({connections.length})</span>
+          </h2>
+          <div className="space-y-2">
+            {connections.map((c, i) => (
+              <div key={i} className="flex items-center justify-between bg-black border border-white/5 p-3 rounded-lg text-sm">
+                <div className="flex items-center space-x-3">
+                  <div className={`w-2 h-2 rounded-full ${connectionStateDot(c.state)}`} />
+                  <span className="font-mono text-gray-300">{c.address}</span>
+                  {c.peer_id && <span className="font-mono text-xs text-gray-600">{c.peer_id.slice(0, 12)}...</span>}
+                </div>
+                <div className="flex items-center space-x-4 text-xs">
+                  <span className={connectionStateColor(c.state)}>{c.state}</span>
+                  {c.rtt_ms != null && <span className="text-gray-500">{c.rtt_ms}ms</span>}
+                  {c.uptime_seconds > 0 && <span className="text-gray-600">{formatUptime(c.uptime_seconds)}</span>}
+                  {c.reconnect_attempts > 0 && (
+                    <span className="text-compute text-xs">{c.reconnect_attempts} retries</span>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Peers */}
+      {peers.length > 0 && (
+        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
+          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4">Authenticated Peers ({peers.length})</h2>
+          <div className="space-y-2">
+            {peers.map((p, i) => (
+              <div key={i} className="flex items-center justify-between bg-black border border-white/5 p-3 rounded-lg text-sm">
+                <div className="flex items-center space-x-3">
+                  <div className={`w-2 h-2 rounded-full ${p.status === 'routable' ? 'bg-spore' : 'bg-gray-600'}`} />
+                  <span className="font-mono text-gray-300">{p.peer_id?.slice(0, 16)}...</span>
+                </div>
+                <div className="flex items-center space-x-4 text-xs text-gray-500">
+                  <span>{p.role}</span>
+                  <span>{p.models?.length || 0} models</span>
+                  <span className={p.status === 'routable' ? 'text-spore' : 'text-gray-600'}>{p.status}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* System Info */}
       <div className="border border-white/10 bg-[#111] rounded-xl p-5">
@@ -344,28 +1113,6 @@ function OverviewTab({ status, credits }) {
           </div>
         )}
       </div>
-
-      {/* Peers quick list */}
-      {peers.length > 0 && (
-        <div className="border border-white/10 bg-[#111] rounded-xl p-5">
-          <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4">Connected Peers</h2>
-          <div className="space-y-2">
-            {peers.map((p, i) => (
-              <div key={i} className="flex items-center justify-between bg-black border border-white/5 p-3 rounded-lg text-sm">
-                <div className="flex items-center space-x-3">
-                  <div className="w-2 h-2 rounded-full bg-spore animate-pulse" />
-                  <span className="font-mono text-gray-300">{p.peer_id?.slice(0, 16)}...</span>
-                </div>
-                <div className="flex items-center space-x-4 text-xs text-gray-500">
-                  <span>{p.role}</span>
-                  <span>{p.models?.join(', ') || 'no models'}</span>
-                  <span className={p.status === 'routable' ? 'text-spore' : 'text-gray-600'}>{p.status}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   )
 }
@@ -1078,19 +1825,39 @@ function CreditsTab({ credits }) {
       <div className="border border-white/10 bg-[#111] rounded-xl p-5">
         <h2 className="font-mono text-xs text-gray-500 uppercase tracking-widest mb-4">Transaction History</h2>
         {history.length > 0 ? (
-          <div className="space-y-1 max-h-[500px] overflow-y-auto custom-scrollbar">
-            {history.map((tx, i) => (
-              <div key={i} className="flex items-center justify-between text-sm py-2 border-b border-white/5">
-                <div className="flex items-center space-x-3">
-                  <div className={`w-1.5 h-1.5 rounded-full ${tx.amount >= 0 ? 'bg-spore' : 'bg-compute'}`} />
-                  <span className="text-gray-400 font-mono text-xs w-16">{tx.timestamp || ''}</span>
-                  <span className="text-gray-300">{tx.reason}</span>
-                </div>
-                <span className={`font-mono text-sm ${tx.amount >= 0 ? 'text-spore' : 'text-compute'}`}>
-                  {tx.amount >= 0 ? '+' : ''}{tx.amount?.toFixed(4)}
-                </span>
-              </div>
-            ))}
+          <div className="overflow-x-auto max-h-[500px] overflow-y-auto custom-scrollbar">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-[#111]">
+                <tr className="text-xs text-gray-500 font-mono uppercase">
+                  <th className="text-left py-2 pr-4 w-8"></th>
+                  <th className="text-left py-2 pr-4">Time</th>
+                  <th className="text-left py-2 pr-4">Type</th>
+                  <th className="text-left py-2 pr-4">Counterparty</th>
+                  <th className="text-right py-2">Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((tx, i) => {
+                  const isCredit = tx.direction === 'credit'
+                  const ts = tx.timestamp ? new Date(tx.timestamp * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : ''
+                  const reason = (tx.reason || '').replace(/_/g, ' ')
+                  const counterparty = tx.counterparty_id ? tx.counterparty_id.slice(0, 12) + '...' : ''
+                  return (
+                    <tr key={i} className="border-t border-white/5 hover:bg-white/[0.02]">
+                      <td className="py-2 pr-2">
+                        <div className={`w-1.5 h-1.5 rounded-full ${isCredit ? 'bg-spore' : 'bg-compute'}`} />
+                      </td>
+                      <td className="py-2 pr-4 text-gray-500 font-mono text-xs whitespace-nowrap">{ts}</td>
+                      <td className="py-2 pr-4 text-gray-300 whitespace-nowrap">{reason}</td>
+                      <td className="py-2 pr-4 text-gray-500 font-mono text-xs">{counterparty}</td>
+                      <td className={`py-2 text-right font-mono whitespace-nowrap ${isCredit ? 'text-spore' : 'text-compute'}`}>
+                        {isCredit ? '+' : '-'}{tx.amount?.toFixed(4)}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
         ) : (
           <p className="text-sm text-gray-500 text-center py-8">No transactions yet.</p>
@@ -1201,6 +1968,7 @@ export default function App() {
   const [logs, setLogs] = useState([])
   const [refreshTick, setRefreshTick] = useState(0)
   const [fleetCount, setFleetCount] = useState(0)
+  const [liveActivityEvents, setLiveActivityEvents] = useState([])
   const nodeRegistry = useManagedNodes()
 
   const triggerRefresh = useCallback(() => setRefreshTick(t => t + 1), [])
@@ -1241,10 +2009,15 @@ export default function App() {
     return () => clearInterval(iv)
   }, [appState, refreshTick])
 
-  // Poll fleet count from registry
+  // Poll fleet nodes from registry
+  const [fleetNodes, setFleetNodes] = useState([])
   useEffect(() => {
     if (appState !== 'dashboard') return
-    const fetch_ = () => api('/v1/admin/nodes').then(d => setFleetCount((d.nodes || []).length)).catch(() => {})
+    const fetch_ = () => api('/v1/admin/nodes').then(d => {
+      const nodes = d.nodes || []
+      setFleetNodes(nodes)
+      setFleetCount(nodes.length)
+    }).catch(() => {})
     fetch_()
     const iv = setInterval(fetch_, 5000)
     return () => clearInterval(iv)
@@ -1261,6 +2034,22 @@ export default function App() {
         setLogs(prev => {
           const next = [...prev, entry]
           return next.length > 500 ? next.slice(-500) : next
+        })
+      } catch {}
+    }
+    return () => es.close()
+  }, [appState])
+
+  // SSE activity stream for canvas
+  useEffect(() => {
+    if (appState !== 'dashboard') return
+    const es = new EventSource('/v1/node/activity/stream')
+    es.onmessage = (event) => {
+      try {
+        const e = JSON.parse(event.data)
+        setLiveActivityEvents(prev => {
+          const next = [...prev, e]
+          return next.length > 50 ? next.slice(-50) : next
         })
       } catch {}
     }
@@ -1288,9 +2077,15 @@ export default function App() {
 
   return (
     <NodeRegistryContext.Provider value={nodeRegistry}>
-      <div className="min-h-screen bg-void text-console font-sans">
+      <div className="min-h-screen bg-void text-console font-sans relative">
+        <NetworkCanvas
+          selfNode={status}
+          peers={status?.peers || []}
+          fleetNodes={fleetNodes}
+          activityEvents={liveActivityEvents}
+        />
         {/* Header */}
-        <header className="border-b border-white/10 bg-void/80 backdrop-blur-md sticky top-0 z-50">
+        <header className="border-b border-white/10 bg-void/80 backdrop-blur-md sticky top-0 z-50 relative">
           <div className="max-w-7xl mx-auto px-4 h-14 flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <pre className="text-[4px] leading-none text-compute drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]">{ASCII_SHROOM}</pre>
@@ -1323,7 +2118,7 @@ export default function App() {
         </header>
 
         {/* Tab nav */}
-        <nav className="border-b border-white/5 bg-void/60">
+        <nav className="border-b border-white/5 bg-void/60 relative z-10">
           <div className="max-w-7xl mx-auto px-4 flex space-x-1 overflow-x-auto">
             {TABS.map(t => (
               <button key={t.id} onClick={() => setTab(t.id)}
@@ -1340,8 +2135,8 @@ export default function App() {
         </nav>
 
         {/* Content */}
-        <main className="max-w-7xl mx-auto px-4 py-6">
-          {tab === 'overview' && <OverviewTab status={status} credits={credits} />}
+        <main className="max-w-7xl mx-auto px-4 py-6 relative z-10">
+          {tab === 'overview' && <OverviewTab status={status} credits={credits} fleetNodes={fleetNodes} />}
           {tab === 'network' && <NetworkTab status={status} />}
           {tab === 'models' && <ModelsTab status={status} onRefresh={triggerRefresh} />}
           {tab === 'chat' && <ChatTab />}

@@ -36,6 +36,8 @@ from mycellm.transport.messages import (
 )
 from mycellm.transport.connection import PeerConnection, PeerState
 from mycellm.transport.peer_manager import PeerManager
+from mycellm.activity import ActivityTracker, EventType
+from mycellm.federation import FederationManager
 
 logger = logging.getLogger("mycellm")
 console = Console()
@@ -134,6 +136,12 @@ class MycellmNode:
 
         # Log broadcaster for dashboard SSE
         self.log_broadcaster = LogBroadcaster()
+
+        # Activity tracker
+        self.activity = ActivityTracker()
+
+        # Federation
+        self.federation: FederationManager | None = None
 
         # Managed node registry (bootstrap/admin node tracks announced nodes)
         self.node_registry: dict[str, dict] = {}  # peer_id -> node info
@@ -258,6 +266,7 @@ class MycellmNode:
 
     async def _on_peer_connected(self, protocol) -> None:
         """Handle a new inbound QUIC connection."""
+        self.activity.record(EventType.PEER_CONNECTED, source="inbound")
         logger.debug("New inbound QUIC connection")
 
     async def _handle_peer_message(self, protocol, msg: MessageEnvelope, stream_id: int) -> None:
@@ -284,6 +293,11 @@ class MycellmNode:
                     capabilities=hello.capabilities,
                 )
                 conn.state = PeerState.ROUTABLE
+                self.activity.record(
+                    EventType.PEER_CONNECTED,
+                    peer_id=hello.peer_id,
+                    role=hello.cert.role,
+                )
                 logger.info(
                     f"{styled_tag('P2P')} Peer authenticated: {hello.peer_id[:16]}... "
                     f"(role={hello.cert.role})"
@@ -340,6 +354,9 @@ class MycellmNode:
         model = payload.get("model", "")
         messages = payload.get("messages", [])
         stream = payload.get("stream", False)
+
+        self.activity.record(EventType.INFERENCE_START, model=model, source="peer", peer=msg.from_peer[:16])
+        _infer_start = time.time()
 
         model_name = self.inference.resolve_model_name(model)
         if not model_name:
@@ -406,8 +423,18 @@ class MycellmNode:
 
                 self.reputation.record_success(msg.from_peer, result.completion_tokens if not stream else 0, 0.0)
 
+            _infer_tokens = result.completion_tokens + result.prompt_tokens if not stream else 0
+            self.activity.record(
+                EventType.INFERENCE_COMPLETE,
+                model=model_name,
+                source="peer",
+                tokens=_infer_tokens,
+                latency_ms=round((time.time() - _infer_start) * 1000),
+            )
+
         except Exception as e:
             logger.error(f"{styled_tag('INFER')} Inference failed: {e}")
+            self.activity.record(EventType.INFERENCE_FAILED, model=model, error=str(e), source="peer")
             err = error_message(self.peer_id, msg.id, ErrorCode.BACKEND_ERROR, str(e))
             await protocol.reply_on_stream(stream_id, err)
 
@@ -587,6 +614,13 @@ class MycellmNode:
         self._setup_logging()
         self._load_identity()
 
+        # Initialize federation
+        self.federation = FederationManager(self._settings.data_dir)
+        self.federation.init_network(
+            self.account_key.public_bytes,
+            bootstrap_addrs=[f"{self._settings.quic_host}:{self.quic_port}"],
+        )
+
         # Load cached peers
         self._load_peer_cache()
 
@@ -674,11 +708,14 @@ class MycellmNode:
                         resp = await client.post(url, json=payload, headers=headers)
                         if resp.status_code == 200:
                             logger.info(f"{styled_tag('NODE')} Announced to bootstrap {host}:{api_port}")
+                            self.activity.record(EventType.ANNOUNCE_OK, bootstrap=f"{host}:{api_port}")
                             return True
                         elif resp.status_code == 401:
                             logger.warning(f"{styled_tag('SECURITY')} Bootstrap rejected announce (bad API key)")
+                            self.activity.record(EventType.ANNOUNCE_FAILED, bootstrap=f"{host}:{api_port}", reason="auth_rejected")
                 except Exception as e:
                     logger.warning(f"{styled_tag('NODE')} Announce to {host}:{api_port} failed: {e}")
+                    self.activity.record(EventType.ANNOUNCE_FAILED, bootstrap=f"{host}:{api_port}", reason=str(e))
             return False
 
         # Initial announce

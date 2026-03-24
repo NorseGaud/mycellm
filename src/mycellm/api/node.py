@@ -8,6 +8,8 @@ import json
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
 
+from mycellm.activity import EventType
+
 router = APIRouter()
 
 
@@ -99,6 +101,7 @@ async def load_model(request: Request):
         # Update capabilities and announce to peers
         node.capabilities.models = node.inference.loaded_models
         await node.announce_capabilities()
+        node.activity.record(EventType.MODEL_LOADED, model=loaded_name, backend=backend_type)
         return {"status": "loaded", "model": loaded_name, "backend": backend_type}
     except Exception as e:
         return {"error": str(e)}
@@ -116,6 +119,7 @@ async def unload_model(request: Request):
     await node.inference.unload_model(model_name)
     node.capabilities.models = node.inference.loaded_models
     await node.announce_capabilities()
+    node.activity.record(EventType.MODEL_UNLOADED, model=model_name)
     return {"status": "unloaded", "model": model_name}
 
 
@@ -181,5 +185,139 @@ async def stream_logs(request: Request):
             pass
         finally:
             node.log_broadcaster.unsubscribe(q)
+
+    return EventSourceResponse(generate())
+
+
+@router.get("/federation")
+async def federation_info(request: Request):
+    """Get network federation info."""
+    node = request.app.state.node
+    if not hasattr(node, 'federation') or not node.federation:
+        return {"network_id": "", "network_name": "", "federation": False}
+    identity = node.federation.identity
+    return {
+        "federation": True,
+        "network_id": identity.network_id if identity else "",
+        "network_name": identity.network_name if identity else "",
+        "public": identity.public if identity else False,
+        "bootstrap_addrs": identity.bootstrap_addrs if identity else [],
+        "tokens": len(node.federation.list_tokens()),
+    }
+
+
+@router.post("/federation/invite")
+async def create_invite(request: Request):
+    """Create a federation invite token."""
+    node = request.app.state.node
+    if not hasattr(node, 'federation') or not node.federation:
+        return {"error": "Federation not initialized"}
+    body = await request.json()
+    token = node.federation.create_invite(
+        node.device_key,
+        roles=body.get("roles", ["seeder"]),
+        max_uses=body.get("max_uses", 0),
+        expires_hours=body.get("expires_hours", 0),
+    )
+    return {
+        "token_id": token.token_id,
+        "portable": token.to_portable(),
+        "expires_at": token.expires_at,
+        "max_uses": token.max_uses,
+    }
+
+
+@router.get("/federation/tokens")
+async def list_tokens(request: Request):
+    """List all invite tokens."""
+    node = request.app.state.node
+    if not hasattr(node, 'federation') or not node.federation:
+        return {"tokens": []}
+    return {"tokens": node.federation.list_tokens()}
+
+
+@router.get("/public/dashboard")
+async def public_dashboard(request: Request):
+    """Public read-only network dashboard data.
+
+    Exposes only non-sensitive aggregate stats for public networks.
+    """
+    node = request.app.state.node
+
+    # Check if public mode is enabled
+    if hasattr(node, 'federation') and node.federation and node.federation.identity:
+        if not node.federation.identity.public:
+            return {"error": "Public dashboard not enabled for this network"}
+
+    peers = node.registry.connected_peers()
+    fleet_count = len([n for n in node.node_registry.values() if n.get("status") == "approved"])
+
+    # Aggregate model info (no API keys or addresses)
+    models = set()
+    for m in node.inference.loaded_models:
+        models.add(m.name)
+    for entry in peers:
+        for m in entry.capabilities.models:
+            models.add(m.name)
+    for entry in node.node_registry.values():
+        if entry.get("status") == "approved":
+            for m in entry.get("capabilities", {}).get("models", []):
+                name = m.get("name", m) if isinstance(m, dict) else m
+                models.add(name)
+
+    stats = node.activity.stats() if hasattr(node, 'activity') else {}
+
+    return {
+        "network": {
+            "name": node.federation.identity.network_name if node.federation and node.federation.identity else "mycellm",
+            "id": node.federation.network_id[:12] if node.federation else "",
+            "public": True,
+        },
+        "nodes": {
+            "total": 1 + len(peers) + fleet_count,
+            "peers": len(peers),
+            "fleet": fleet_count,
+        },
+        "models": sorted(models),
+        "stats": {
+            "total_requests": stats.get("total_requests", 0),
+            "total_tokens": stats.get("total_tokens", 0),
+            "requests_per_min": stats.get("requests_per_min", 0),
+        },
+        "uptime_seconds": node.uptime,
+    }
+
+
+@router.get("/activity")
+async def node_activity(request: Request, limit: int = 50, type: str = None):
+    """Get recent activity events and rolling stats."""
+    node = request.app.state.node
+    return {
+        "events": node.activity.recent(limit=limit, event_type=type),
+        "stats": node.activity.stats(),
+        "sparklines": {
+            "requests": node.activity.sparkline("requests", 30),
+            "tokens": node.activity.sparkline("tokens", 30),
+            "credits_earned": node.activity.sparkline("credits_earned", 30),
+            "credits_spent": node.activity.sparkline("credits_spent", 30),
+        },
+    }
+
+
+@router.get("/activity/stream")
+async def stream_activity(request: Request):
+    """Stream activity events via SSE."""
+    node = request.app.state.node
+    q = node.activity.subscribe()
+
+    async def generate():
+        try:
+            while True:
+                event = await q.get()
+                yield json.dumps(event.to_dict())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            node.activity.unsubscribe(q)
 
     return EventSourceResponse(generate())
