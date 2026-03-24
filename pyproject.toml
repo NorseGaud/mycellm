@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mycellm"
-version = "0.1.0"
+version = "0.1.2"
 description = "Distributed LLM inference across heterogeneous hardware"
 readme = "README.md"
 license = "Apache-2.0"
@@ -66,6 +66,15 @@ Issues = "https://repo.mycellm.dev/mycellm/mycellm/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mycellm"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/",
+    "tests/",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

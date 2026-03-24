@@ -1041,6 +1041,16 @@ class MycellmNode:
         self.node_registry = await self.node_registry_repo.load_as_dict()
         await self._start_transport()
 
+        # Start NAT discovery (non-blocking background)
+        try:
+            from mycellm.nat.discovery import NATDiscovery
+            self.nat_discovery = NATDiscovery()
+            await self.nat_discovery.start(local_port=self.quic_port)
+            logger.info(f"{styled_tag('NAT')} Discovery started ({self.nat_discovery.info.nat_type.value})")
+        except Exception as e:
+            logger.debug(f"NAT discovery failed to start: {e}")
+            self.nat_discovery = None
+
         if self.enable_dht:
             await self._start_dht()
 
@@ -1118,22 +1128,16 @@ class MycellmNode:
                 }
             any_ok = False
             for host, port in peers:
-                # LAN IPs: use http://host:api_port, send real hostname
-                # Public domains: use https://host, send anonymized name
                 is_lan = host.startswith("10.") or host.startswith("192.168.") or host.startswith("172.") or host.startswith("127.") or host == "localhost"
+                # Only HTTP-announce to LAN bootstraps (fleet management).
+                # Public bootstraps discover peers via QUIC — no fleet registration.
+                if not is_lan:
+                    continue
                 payload = {**base_payload}
-                if is_lan:
-                    api_port = port if port != 8421 else 8420
-                    url = f"http://{host}:{api_port}/v1/admin/nodes/announce"
-                    payload["node_name"] = self._settings.node_name
-                    payload["system"] = sys_info
-                else:
-                    url = f"https://{host}/v1/admin/nodes/announce"
-                    payload["node_name"] = public_name
-                    # Public: only share GPU type + model count, not full system info
-                    payload["system"] = {
-                        "gpu": sys_info.get("gpu", {}),
-                    }
+                api_port = port if port != 8421 else 8420
+                url = f"http://{host}:{api_port}/v1/admin/nodes/announce"
+                payload["node_name"] = self._settings.node_name
+                payload["system"] = sys_info
                 try:
                     transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
                     async with httpx.AsyncClient(timeout=10, transport=transport) as client:
@@ -1420,6 +1424,7 @@ class MycellmNode:
                 "active": self.inference.active_count,
                 "max_concurrent": self.inference._max_concurrent,
             },
+            "nat": self.nat_discovery.info.to_dict() if hasattr(self, 'nat_discovery') and self.nat_discovery else {},
         }
 
     def get_system_info(self) -> dict:

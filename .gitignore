@@ -9,3 +9,4 @@ build/
 .env
 web/node_modules/
 
+docker/.env.prod
