@@ -1,14 +1,14 @@
 # mycellm public bootstrap node — no models, just network coordination.
 #
-# Runs on docker-box (96.126.98.204) behind Caddy:
-#   api.mycellm.dev       → localhost:8420 (HTTP API + dashboard)
-#   bootstrap.mycellm.dev → :8421/UDP     (QUIC peer bootstrap)
+# Deploy behind a reverse proxy (Caddy, nginx, etc.):
+#   yourdomain.com → localhost:8420 (HTTP API + dashboard)
+#   QUIC bootstrap → :8421/UDP (direct, no proxy)
 #
 # Usage:
 #   docker compose -f docker/docker-compose.prod.yml up -d --build
 #
 # First run auto-creates identity + public network via entrypoint.sh.
-# Set MYCELLM_API_KEY in .env to secure the admin dashboard.
+# Copy .env.prod.example to .env.prod and set MYCELLM_API_KEY.
 
 services:
   mycellm:
@@ -26,7 +26,7 @@ services:
       MYCELLM_NETWORK_NAME: mycellm-public
       MYCELLM_PUBLIC: "true"
       MYCELLM_API_HOST: "0.0.0.0"
-      MYCELLM_EXTERNAL_HOST: "96.126.98.204"
+      MYCELLM_EXTERNAL_HOST: "${MYCELLM_EXTERNAL_HOST:-}"
       MYCELLM_DB_URL: postgresql+asyncpg://mycellm:mycellm@postgres:5432/mycellm
       MYCELLM_TELEMETRY: "true"
       MYCELLM_LOG_LEVEL: INFO

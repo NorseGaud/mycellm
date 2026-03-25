@@ -10,3 +10,4 @@ build/
 web/node_modules/
 
 docker/.env.prod
+scripts/deploy-bootstrap.sh

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/site/docs/assets/mycellm-logo.svg" width="80" alt="mycellm">
+  <img src="https://raw.githubusercontent.com/mycellm/mycellm/main/docs/site/docs/assets/mycellm-logo.svg" width="80" alt="mycellm">
 </p>
 
 <h1 align="center">mycellm_</h1>
@@ -10,12 +10,23 @@
 </p>
 
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://pypi.org/project/mycellm/"><img src="https://img.shields.io/pypi/v/mycellm.svg?color=green" alt="PyPI"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python"></a>
+  <a href="https://mycellm.ai"><img src="https://img.shields.io/badge/website-mycellm.ai-spore" alt="Website"></a>
+</p>
+
+<p align="center">
   <a href="https://mycellm.ai">Website</a> ·
   <a href="https://docs.mycellm.dev/quickstart/install">Docs</a> ·
   <a href="https://mycellm.ai/join">Join the network</a>
 </p>
 
 ---
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mycellm/mycellm/main/docs/screenshots/dashboard-overview.png" alt="mycellm dashboard — fleet overview with network health, hardware cards, and QUIC peer topology" width="100%">
+</p>
 
 ## What is mycellm?
 
@@ -91,6 +102,10 @@ You (consumer) ──QUIC──▶ Bootstrap (relay) ──QUIC──▶ Seeder 
 
 ## Features
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/mycellm/mycellm/main/docs/screenshots/dashboard-models.png" alt="mycellm models — fleet device management with HuggingFace model browser" width="100%">
+</p>
+
 ### Inference
 - **llama.cpp** backend with Metal, CUDA, ROCm, and CPU support
 - **Streaming** token generation via SSE
@@ -119,15 +134,37 @@ You (consumer) ──QUIC──▶ Bootstrap (relay) ──QUIC──▶ Seeder 
 - **Fleet** — enterprise management with remote commands
 - **Trust levels** — strict (verify all), relaxed (verify, don't enforce), honor (trusted LAN)
 
+## Use Cases
+
+### AI Coding Assistants
+mycellm works as a drop-in backend for OpenAI-compatible coding tools:
+
+- **[OpenClaw](https://openclaw.ai)** — autonomous AI agent framework. Point it at `http://localhost:8420/v1` and your fleet serves the inference.
+- **[OpenCode](https://github.com/opencode-ai/opencode)** — open-source coding assistant. Set `OPENAI_BASE_URL` to your mycellm node.
+- **Claude Code / aider / Continue.dev** — any tool that accepts an OpenAI base URL.
+
+No API keys to manage, no usage limits, no vendor lock-in. Your hardware, your models.
+
+### Homelab GPU Fleet
+Pool every GPU in your house into one inference endpoint. An M1 Max Mac Studio, an old gaming PC with an RTX 3090, an iPad Pro — they all join the same network and share the load. The dashboard lets you manage models across all devices from a single browser tab.
+
+### Research Labs & Universities
+Create a private mycellm network for your lab. Students and researchers get free inference from shared departmental GPUs. Ed25519 identity ensures accountability. Credit-based access prevents one user from monopolizing the cluster.
+
+### At Scale
+When dozens of nodes contribute compute, mycellm's quality-aware routing shines:
+- **Tier routing** — route to the best model that fits the request (1B for quick tasks, 70B for complex reasoning)
+- **Automatic failover** — if a node goes offline, requests route to the next best
+- **Credit economics** — contributors earn credits, consumers spend them, freeloaders get throttled
+
 ## iOS App
 
-The mycellm iOS app makes any iPhone or iPad a first-class network node.
+The mycellm iOS app makes any iPhone or iPad a first-class network node. An iPad Pro with an M-series chip can serve 3B+ models at 30+ tokens/sec — competitive with many cloud instances.
 
 - **On-device inference** — llama.cpp on Metal, streaming tokens
 - **Network chat** — route to any model on the public network
 - **QUIC P2P** — authenticated with the bootstrap, serves inference
 - **Sensitive Data Guard** — auto-routes sensitive prompts to local model
-- **OLED screensaver** — brand-colored mushroom with spore particles
 
 Requires iOS 17.0+. Coming soon to TestFlight.
 
