@@ -256,6 +256,9 @@ Built by [Michael Gifford-Santos](https://github.com/mijkal).
 
 Apache 2.0 — see [LICENSE](LICENSE).
 
+"mycellm" and the mycellm logo are trademarks of Michael Gifford-Santos.
+See [TRADEMARK.md](TRADEMARK.md) for usage guidelines.
+
 ---
 
 <p align="center">
