@@ -5,8 +5,8 @@
 <h1 align="center">mycellm_</h1>
 
 <p align="center">
-  <strong>Distributed LLM inference across heterogeneous hardware.</strong><br>
-  <em>A peer-to-peer network for running AI on GPUs worldwide.</em>
+  <strong>Pool GPUs worldwide. Earn credits. No cloud required.</strong><br>
+  <em>A peer-to-peer inference network with credits, privacy, and federation.</em>
 </p>
 
 <p align="center">
@@ -19,6 +19,7 @@
 <p align="center">
   <a href="https://mycellm.ai">Website</a> ·
   <a href="https://docs.mycellm.dev/quickstart/install">Docs</a> ·
+  <a href="https://github.com/mycellm/mycellm-ios">iOS App</a> ·
   <a href="https://mycellm.ai/join">Join the network</a>
 </p>
 
@@ -30,13 +31,14 @@
 
 ## What is mycellm?
 
-mycellm pools GPUs across the internet into a single inference network. Anyone can contribute compute and earn credits. Anyone can chat with frontier models for free.
+mycellm pools GPUs across the internet into a single inference network. Contribute compute and earn credits. Chat with open models for free. No blockchain, no tokens, no cloud vendor — just peers serving peers.
 
-- **OpenAI-compatible API** — drop-in replacement at `/v1/chat/completions`
-- **P2P architecture** — no central GPU cluster, no vendor lock-in
-- **Ed25519 cryptographic identity** — signed receipts, verifiable accounting
-- **Multi-network federation** — public swarm, private orgs, fleet management
-- **iOS app** — your iPad is a first-class inference node (Metal + llama.cpp)
+- **Credit economy** — earn credits by seeding, spend them consuming. Ed25519-signed receipts for every request. No cryptocurrency.
+- **Sensitive Data Guard** — outgoing prompts are scanned on-device for API keys, passwords, and PII. Sensitive queries route to your local model automatically.
+- **Private networks** — create invite-only inference networks for your team, lab, or org. Federation bridges multiple networks. Fleet management for enterprise.
+- **OpenAI-compatible API** — drop-in replacement at `/v1/chat/completions`. Works with Claude Code, aider, Continue.dev, or any tool that accepts an OpenAI base URL.
+- **iOS app** — native app for iPad and iPhone. Your iPad serves inference at 30+ tokens/sec on Metal and earns credits as a full network peer.
+- **No cloud, no lock-in** — QUIC transport with NAT traversal. Works across the internet, not just your LAN. Your hardware, your models.
 
 ## Quick Start
 
@@ -91,6 +93,18 @@ You (consumer) ──QUIC──▶ Bootstrap (relay) ──QUIC──▶ Seeder 
 4. **Credits** flow to seeders — signed Ed25519 receipts for every request
 5. **NAT traversal** enables direct P2P connections when possible
 
+## Why mycellm?
+
+| | mycellm | Cloud APIs | Local-only tools | Blockchain projects |
+|---|---|---|---|---|
+| **Works over internet** | QUIC + NAT traversal | N/A | LAN only | Varies |
+| **No vendor lock-in** | Your hardware | Their hardware | Your hardware | Token buy-in |
+| **Credit accounting** | Signed receipts | Pay per token | None | Token economics |
+| **Private networks** | Invite-only federation | N/A | N/A | Public by default |
+| **Privacy** | PII scanning + local redirect | Trust the provider | Full control | Trust the miner |
+| **Mobile nodes** | Native iOS app | N/A | N/A | N/A |
+| **Cost** | Free (contribute compute) | $$$ | Free | Buy tokens |
+
 ## Architecture
 
 | Layer | Purpose | Tech |
@@ -118,13 +132,12 @@ You (consumer) ──QUIC──▶ Bootstrap (relay) ──QUIC──▶ Seeder 
 - **HTTP fallback** — works when QUIC is blocked
 - **Bootstrap relay** — always works, even behind symmetric NAT
 
-### Security
-- **Ed25519 identity** — account key → device cert → peer ID
-- **Signed receipts** — cryptographic proof of inference served
-- **Sensitive Data Guard** — regex scanning for API keys, passwords, PII
-  - Client-side: blocks/redirects before sending
-  - Gateway: returns 422 with explanation
-  - Bypass: `X-Privacy-Override: acknowledged` header
+### Security & Privacy
+- **Sensitive Data Guard** — scans every outgoing prompt for API keys, passwords, credit cards, and PII. High-severity matches are automatically redirected to your local model — sensitive data never leaves your device.
+  - Gateway: returns 422 with explanation for flagged requests
+  - Override: `X-Privacy-Override: acknowledged` header
+- **Ed25519 identity** — account key → device cert → peer ID. Every node has a cryptographic identity.
+- **Signed receipts** — cryptographic proof of inference served. Verifiable accounting without a blockchain.
 - **Fleet management** — remote node control with admin key auth
 
 ### Multi-Network
@@ -159,14 +172,15 @@ When dozens of nodes contribute compute, mycellm's quality-aware routing shines:
 
 ## iOS App
 
-The mycellm iOS app makes any iPhone or iPad a first-class network node. An iPad Pro with an M-series chip can serve 3B+ models at 30+ tokens/sec — competitive with many cloud instances.
+Native app for iPad and iPhone. Your iPad is a full peer on the network — serve inference at 30+ tokens/sec on Metal, earn credits, and chat with privacy protection.
 
-- **On-device inference** — llama.cpp on Metal, streaming tokens
-- **Network chat** — route to any model on the public network
-- **QUIC P2P** — authenticated with the bootstrap, serves inference
-- **Sensitive Data Guard** — auto-routes sensitive prompts to local model
+- **On-device inference** — llama.cpp on Metal, optimized for M-series iPads
+- **Network + local routing** — toggle between network and on-device per message, with automatic fallback
+- **Chat persistence** — threaded conversations with full metadata (model, node, tokens/sec, route). Export and share threads. Private ephemeral sessions.
+- **Sensitive Data Guard** — prompts are scanned on-device; sensitive queries route to your local model
+- **Serves an OpenAI API** — your iPad exposes `/v1/chat/completions` on your LAN for other tools to use
 
-Requires iOS 17.0+. Coming soon to TestFlight.
+Requires iOS 17.0+. Also works on iPhone. [Source on GitHub.](https://github.com/mycellm/mycellm-ios)
 
 ## Configuration
 
