@@ -161,14 +161,22 @@ export function ModelTable({ selectedDevice }: ModelTableProps) {
     [isRemote, selectedDevice]
   )
 
-  // Fetch local files + saved configs
+  // Fetch local files + saved configs (stable updates to avoid flicker)
   useEffect(() => {
+    let lastFilesJson = ''
+    let lastConfigsJson = ''
     const fetchData = () => {
       nodeGet<{ files?: LocalFile[] }>(API.models.localFiles)
-        .then((d) => setLocalFiles(d.files || []))
+        .then((d) => {
+          const json = JSON.stringify(d.files || [])
+          if (json !== lastFilesJson) { lastFilesJson = json; setLocalFiles(d.files || []) }
+        })
         .catch(() => {})
       nodeGet<{ configs?: SavedModel[] }>(API.models.saved)
-        .then((d) => setSavedConfigs(d.configs || []))
+        .then((d) => {
+          const json = JSON.stringify(d.configs || [])
+          if (json !== lastConfigsJson) { lastConfigsJson = json; setSavedConfigs(d.configs || []) }
+        })
         .catch(() => {})
     }
     fetchData()
@@ -176,11 +184,15 @@ export function ModelTable({ selectedDevice }: ModelTableProps) {
     return () => clearInterval(iv)
   }, [nodeGet])
 
-  // Poll load statuses
+  // Poll load statuses (stable updates)
   useEffect(() => {
+    let lastJson = ''
     const poll = () => {
       nodeGet<{ statuses?: LoadStatus[] }>(API.models.loadStatus)
-        .then((d) => setLoadStatuses(d.statuses || []))
+        .then((d) => {
+          const json = JSON.stringify(d.statuses || [])
+          if (json !== lastJson) { lastJson = json; setLoadStatuses(d.statuses || []) }
+        })
         .catch(() => {})
     }
     poll()

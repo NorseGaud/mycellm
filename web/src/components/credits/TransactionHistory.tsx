@@ -78,7 +78,7 @@ export function TransactionHistory() {
                       )}
                     >
                       {isCredit ? '+' : '-'}
-                      {tx.amount?.toFixed(4)}
+                      {Math.abs(tx.amount || 0).toFixed(4)}
                     </td>
                   </tr>
                 )

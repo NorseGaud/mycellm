@@ -76,7 +76,7 @@ export function DeviceTable({ selected, onSelect }: DeviceTableProps) {
     gpu: hw.gpu || hw.gpu_name || 'CPU',
     backend: hw.backend || hw.gpu_backend || 'cpu',
     ram: hw.vram_gb || 0,
-    models: models.map((m) => m.id),
+    models: models.filter((m) => !m.owned_by || m.owned_by === 'local').map((m) => m.id),
     online: true,
     role: nodeStatus?.role || 'bootstrap',
     isSelf: true,

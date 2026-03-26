@@ -20,14 +20,14 @@ export function CreditsSummary() {
       />
       <StatCard
         label={t('totalEarned', 'Total Earned')}
-        value={`+${earned.toFixed(2)}`}
+        value={`+${Math.abs(earned).toFixed(2)}`}
         icon={TrendingUp}
         color="spore"
         highlight
       />
       <StatCard
         label={t('totalSpent', 'Total Spent')}
-        value={`-${spent.toFixed(2)}`}
+        value={spent ? `-${Math.abs(spent).toFixed(2)}` : '0.00'}
         icon={TrendingDown}
         color="compute"
         highlight
