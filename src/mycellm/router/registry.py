@@ -24,6 +24,17 @@ class PeerEntry:
     last_seen: float = field(default_factory=time.time)
     failure_count: int = 0
     network_ids: list[str] = field(default_factory=list)
+    address_scores: dict[str, int] = field(default_factory=dict)  # addr -> success count
+
+    def record_address_success(self, addr: str) -> None:
+        self.address_scores[addr] = self.address_scores.get(addr, 0) + 1
+
+    def record_address_failure(self, addr: str) -> None:
+        self.address_scores[addr] = max(self.address_scores.get(addr, 0) - 1, -3)
+
+    def sorted_addresses(self) -> list[str]:
+        """Return addresses sorted by score (best first)."""
+        return sorted(self.addresses, key=lambda a: self.address_scores.get(a, 0), reverse=True)
 
 
 class PeerRegistry:

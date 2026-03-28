@@ -174,6 +174,10 @@ export interface Connection {
   peer_id: string
   state: 'routable' | 'connecting' | 'disconnected'
   transport?: string
+  address?: string
+  rtt_ms?: number | null
+  uptime_seconds?: number
+  reconnect_attempts?: number
 }
 
 export interface SearchResult {

@@ -92,6 +92,26 @@ export function NetworkHealthBar() {
           <span key={i}>{p}</span>
         ))}
       </div>
+
+      {connections.filter((c) => c.state === 'routable' && c.rtt_ms != null).length > 0 && (
+        <div className="mt-2 space-y-1">
+          {connections
+            .filter((c) => c.state === 'routable')
+            .map((c, i) => (
+              <div key={i} className="flex items-center justify-between text-xs font-mono">
+                <span className="text-gray-500 truncate">
+                  {c.address || c.peer_id?.slice(0, 12) || '?'}
+                </span>
+                <span className={cn(
+                  c.rtt_ms != null && c.rtt_ms < 100 ? 'text-spore' :
+                  c.rtt_ms != null && c.rtt_ms < 500 ? 'text-ledger' : 'text-compute',
+                )}>
+                  {c.rtt_ms != null ? `${Math.round(c.rtt_ms)}ms` : '—'}
+                </span>
+              </div>
+            ))}
+        </div>
+      )}
     </div>
   )
 }
