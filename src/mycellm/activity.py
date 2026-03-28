@@ -27,6 +27,11 @@ class EventType(str, Enum):
     ANNOUNCE_OK = "announce_ok"
     ANNOUNCE_FAILED = "announce_failed"
     FLEET_NODE_JOINED = "fleet_node_joined"
+    PEER_EXCHANGE_RECEIVED = "peer_exchange_received"
+    NAT_DISCOVERED = "nat_discovered"
+    CONNECTION_HEALTH = "connection_health"
+    NODE_STARTED = "node_started"
+    NODE_ERROR = "node_error"
 
 
 @dataclass

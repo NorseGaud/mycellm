@@ -17,6 +17,10 @@ import {
   Minus,
   ArrowUp,
   ArrowDown,
+  Globe,
+  HeartPulse,
+  Power,
+  Share2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useActivityStore } from '@/stores/activity'
@@ -36,6 +40,11 @@ const typeColors: Record<string, string> = {
   announce_ok: 'text-spore/50',
   announce_failed: 'text-poison',
   fleet_node_joined: 'text-ledger',
+  peer_exchange_received: 'text-relay',
+  nat_discovered: 'text-relay/70',
+  connection_health: 'text-yellow-500',
+  node_started: 'text-spore',
+  node_error: 'text-red-400',
 }
 
 const typeIcons: Record<string, typeof Cpu> = {
@@ -52,6 +61,11 @@ const typeIcons: Record<string, typeof Cpu> = {
   announce_ok: Radio,
   announce_failed: AlertTriangle,
   fleet_node_joined: Users,
+  peer_exchange_received: Share2,
+  nat_discovered: Globe,
+  connection_health: HeartPulse,
+  node_started: Power,
+  node_error: AlertTriangle,
 }
 
 function eventLabel(e: ActivityEvent): string {
@@ -80,6 +94,16 @@ function eventLabel(e: ActivityEvent): string {
       return `Announce failed`
     case 'fleet_node_joined':
       return `${e.node_name || 'node'} joined fleet`
+    case 'peer_exchange_received':
+      return `Discovered ${e.peers_discovered || 0} peer(s) via exchange`
+    case 'nat_discovered':
+      return `NAT: ${e.nat_type || '?'} (${e.public_ip || '?'}, hole-punch=${e.hole_punch || '?'})`
+    case 'connection_health':
+      return `Peer ${(e.peer_id || '').slice(0, 12)}... ${e.status || '?'} (health=${e.health || '?'})`
+    case 'node_started':
+      return `Node started (${e.node_name || e.peer_id || '?'})`
+    case 'node_error':
+      return `${e.message || 'Error occurred'}`
     default:
       return e.type.replace(/_/g, ' ')
   }

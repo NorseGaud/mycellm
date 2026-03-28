@@ -45,6 +45,10 @@ class MycellmQuicProtocol(QuicConnectionProtocol):
     def quic_event_received(self, event: QuicEvent) -> None:
         if isinstance(event, HandshakeCompleted):
             self._handshake_complete.set()
+            try:
+                self._peer_addr = self._quic._network_paths[0].addr
+            except (IndexError, AttributeError):
+                pass
             logger.debug("QUIC handshake completed")
 
         elif isinstance(event, StreamDataReceived):
@@ -62,10 +66,16 @@ class MycellmQuicProtocol(QuicConnectionProtocol):
                 # Standard path: entire message in one stream
                 self._buffers.pop(stream_id, None)
                 self._dispatch_message(buf, stream_id)
-            else:
-                # Try length-prefixed framing (iOS NWConnection sends on stream 0)
+            elif stream_id % 4 <= 1:
+                # Length-prefixed framing on bidirectional streams only
+                # (iOS NWConnection sends on a single bidirectional stream)
                 self._buffers[stream_id] = buf
                 self._try_framed_dispatch(stream_id)
+            else:
+                # Unidirectional stream — just buffer until end_stream.
+                # QUIC may fragment large messages across multiple events;
+                # treating raw CBOR as length-prefixed corrupts the buffer.
+                self._buffers[stream_id] = buf
 
         elif isinstance(event, ConnectionTerminated):
             self._is_closed = True

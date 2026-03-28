@@ -58,7 +58,7 @@ class PeerConnection:
         """Send a message to this peer."""
         await self.protocol.send_message(msg)
 
-    async def request(self, msg: MessageEnvelope, timeout: float = 30.0) -> MessageEnvelope:
+    async def request(self, msg: MessageEnvelope, timeout: float = 120.0) -> MessageEnvelope:
         """Send a request and wait for the response."""
         if self.is_overloaded:
             from mycellm.protocol.errors import ErrorCode, ProtocolError
@@ -75,14 +75,46 @@ class PeerConnection:
             self._active_requests -= 1
             self._pending_responses.pop(msg.id, None)
 
+    async def request_stream(self, msg: MessageEnvelope, timeout: float = 120.0):
+        """Send a request and yield streaming response messages until INFERENCE_DONE."""
+        if self.is_overloaded:
+            from mycellm.protocol.errors import ErrorCode, ProtocolError
+            raise ProtocolError(ErrorCode.OVERLOADED, "Peer at max concurrent requests")
+
+        queue: asyncio.Queue[MessageEnvelope] = asyncio.Queue(maxsize=500)
+        self._pending_responses[msg.id] = queue
+        self._active_requests += 1
+
+        try:
+            await self.protocol.send_message(msg)
+            while True:
+                resp = await asyncio.wait_for(queue.get(), timeout=timeout)
+                if resp.type == MessageType.INFERENCE_DONE:
+                    return
+                if resp.type == MessageType.ERROR:
+                    raise RuntimeError(resp.payload.get("message", "peer error"))
+                yield resp
+        finally:
+            self._active_requests -= 1
+            self._pending_responses.pop(msg.id, None)
+
     def handle_response(self, msg: MessageEnvelope) -> bool:
         """Handle an incoming message that may be a response to a pending request.
 
         Returns True if it was consumed as a response.
         """
-        future = self._pending_responses.get(msg.id)
-        if future and not future.done():
-            future.set_result(msg)
+        pending = self._pending_responses.get(msg.id)
+        if pending is None:
+            return False
+        # Queue-based (streaming) or Future-based (single response)
+        if isinstance(pending, asyncio.Queue):
+            try:
+                pending.put_nowait(msg)
+            except asyncio.QueueFull:
+                pass
+            return True
+        if isinstance(pending, asyncio.Future) and not pending.done():
+            pending.set_result(msg)
             return True
         return False
 

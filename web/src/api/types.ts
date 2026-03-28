@@ -146,6 +146,13 @@ export interface ActivityEvent {
   peer_id?: string
   amount?: number
   node_name?: string
+  peers_discovered?: number
+  nat_type?: string
+  public_ip?: string
+  hole_punch?: string
+  status?: string
+  health?: number
+  message?: string
 }
 
 export interface ActivityData {

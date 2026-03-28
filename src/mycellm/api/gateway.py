@@ -228,6 +228,43 @@ async def public_chat(request: Request):
             if fleet_addr and fleet_addr.startswith("quic:"):
                 peer_id = fleet_addr[5:]
                 try:
+                    if stream:
+                        # True streaming: yield tokens as they arrive from peer
+                        from fastapi.responses import StreamingResponse
+                        _model = model_name
+                        _peer = peer_id
+
+                        async def _quic_stream_real():
+                            total_text = ""
+                            token_count = 0
+                            async for chunk in node.route_inference_stream(
+                                _model, messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                            ):
+                                text = chunk.get("text", "")
+                                total_text += text
+                                token_count += 1
+                                sse_chunk = {
+                                    "id": request_id, "object": "chat.completion.chunk",
+                                    "model": _model,
+                                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": chunk.get("finish_reason")}],
+                                    "mycellm": {"node": _node_hash(_peer), "served_by": "mycellm-public"},
+                                }
+                                yield f"data: {json.dumps(sse_chunk)}\n\n"
+                            latency_ms = round((time.time() - start_time) * 1000)
+                            _record_usage(client_ip, token_count)
+                            node.activity.record(
+                                EventType.INFERENCE_COMPLETE,
+                                model=_model, source="public_gateway_quic_stream",
+                                tokens=token_count, latency_ms=latency_ms,
+                            )
+                            yield "data: [DONE]\n\n"
+
+                        return StreamingResponse(_quic_stream_real(), media_type="text/event-stream",
+                            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+                    # Non-streaming: wait for full response
                     result = await node.route_inference(
                         model_name, messages,
                         temperature=temperature,
@@ -244,19 +281,6 @@ async def public_chat(request: Request):
                             model=model_name, source="public_gateway_quic",
                             tokens=completion_tokens, latency_ms=latency_ms,
                         )
-                        if stream:
-                            from fastapi.responses import StreamingResponse
-                            async def _quic_stream():
-                                chunk = {
-                                    "id": request_id, "object": "chat.completion.chunk",
-                                    "model": model_name,
-                                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}],
-                                    "mycellm": {"node": _node_hash(peer_id), "latency_ms": latency_ms, "served_by": "mycellm-public"},
-                                }
-                                yield f"data: {json.dumps(chunk)}\n\n"
-                                yield "data: [DONE]\n\n"
-                            return StreamingResponse(_quic_stream(), media_type="text/event-stream",
-                                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
                         return _clean_response(request_id, model_name, text, "stop",
                             prompt_tokens, completion_tokens, latency_ms, node_id=_node_hash(peer_id))
                 except Exception as e:

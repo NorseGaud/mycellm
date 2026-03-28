@@ -96,14 +96,27 @@ class PeerManager:
                 peer.connection = None
             peer.state = PeerConnectionState.DISCONNECTED
 
-    def add_peer(self, host: str, port: int) -> None:
-        """Add a new peer to manage (e.g. discovered via DHT)."""
+    def add_peer(self, host: str, port: int, peer_id: str = "") -> None:
+        """Add a new peer to manage (e.g. discovered via DHT or peer exchange).
+
+        If peer_id is provided and we already have a routable connection to
+        that peer (via any address), the new address is skipped to avoid
+        redundant connections.
+        """
         key = f"{host}:{port}"
-        if key not in self._managed_peers and self._running:
-            peer = ManagedPeer(host, port)
-            self._managed_peers[key] = peer
-            task = asyncio.create_task(self._manage_peer(peer))
-            self._tasks.append(task)
+        if key in self._managed_peers or not self._running:
+            return
+
+        # Dedup by peer_id — don't connect to a second address for the same peer
+        if peer_id:
+            for existing in self._managed_peers.values():
+                if existing.peer_id == peer_id and existing.state == PeerConnectionState.ROUTABLE:
+                    return
+
+        peer = ManagedPeer(host, port)
+        self._managed_peers[key] = peer
+        task = asyncio.create_task(self._manage_peer(peer))
+        self._tasks.append(task)
 
     def get_connections(self) -> list[dict]:
         """Get diagnostic info for all managed peers."""

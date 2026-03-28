@@ -88,6 +88,9 @@ class MycellmSettings(BaseSettings):
     quic_idle_timeout: float = 60.0
     quic_connect_timeout: float = 10.0
 
+    # Peer exchange — how often to broadcast connected peer list (seconds)
+    peer_exchange_interval: int = 90
+
     # Node identity
     node_name: str = Field(default_factory=_generate_node_name)
 

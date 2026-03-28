@@ -68,11 +68,12 @@ class PeerHealthMetrics:
 class HealthChecker:
     """Periodic health checks on connected peers with rich metrics."""
 
-    def __init__(self, registry: PeerRegistry, interval: float = 30.0):
+    def __init__(self, registry: PeerRegistry, interval: float = 30.0, activity=None):
         self._registry = registry
         self._interval = interval
         self._task: asyncio.Task | None = None
         self._metrics: dict[str, PeerHealthMetrics] = {}  # peer_id -> metrics
+        self._activity = activity
 
     def get_metrics(self, peer_id: str) -> PeerHealthMetrics:
         """Get or create health metrics for a peer."""
@@ -114,6 +115,9 @@ class HealthChecker:
                     entry.state = PeerState.DISCONNECTED
                     entry.failure_count += 1
                     logger.warning(f"Peer {entry.peer_id[:8]} ping timeout (health={metrics.health_score:.2f})")
+                    if self._activity:
+                        from mycellm.activity import EventType
+                        self._activity.record(EventType.CONNECTION_HEALTH, peer_id=entry.peer_id[:16], status="timeout", health=round(metrics.health_score, 2))
                 else:
                     metrics.record_success(rtt)
                     entry.state = PeerState.ROUTABLE
@@ -124,3 +128,6 @@ class HealthChecker:
                 entry.state = PeerState.DISCONNECTED
                 entry.failure_count += 1
                 logger.warning(f"Peer {entry.peer_id[:8]} health check failed: {e}")
+                if self._activity:
+                    from mycellm.activity import EventType
+                    self._activity.record(EventType.CONNECTION_HEALTH, peer_id=entry.peer_id[:16], status="failed", health=round(metrics.health_score, 2))

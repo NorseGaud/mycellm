@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import socket
 import time
 from pathlib import Path
 
@@ -125,8 +126,9 @@ class MycellmNode:
         self.inference = InferenceManager(
             max_concurrent=self._settings.max_concurrent_inferences
         )
+        self.activity = ActivityTracker()
         self.registry = PeerRegistry()
-        self.health_checker = HealthChecker(self.registry)
+        self.health_checker = HealthChecker(self.registry, activity=self.activity)
         self.chain_builder = ChainBuilder(self.registry, health_checker=self.health_checker)
         self.model_resolver = ModelResolver(self.registry)
         self.ledger = None  # initialized in run()
@@ -142,12 +144,10 @@ class MycellmNode:
         self._tls_key_path: Path | None = None
         self._peer_connections: dict[str, PeerConnection] = {}
         self._dht_node = None
+        self._peer_exchange_task = None
 
         # Log broadcaster for dashboard SSE
         self.log_broadcaster = LogBroadcaster()
-
-        # Activity tracker
-        self.activity = ActivityTracker()
 
         # Federation
         self.federation: FederationManager | None = None
@@ -345,9 +345,12 @@ class MycellmNode:
                 )
                 conn.state = PeerState.ROUTABLE
 
-                # Set network membership info
+                # Capture peer's QUIC source address for peer exchange
                 reg_entry = self.registry.get(hello.peer_id)
                 if reg_entry:
+                    if protocol._peer_addr and not reg_entry.addresses:
+                        host = protocol._peer_addr[0]
+                        reg_entry.addresses = [f"{host}:8421"]
                     reg_entry.network_ids = hello.network_ids
 
                 self.activity.record(
@@ -862,6 +865,7 @@ class MycellmNode:
     def _handle_peer_exchange(self, msg: MessageEnvelope) -> None:
         """Handle peer exchange -- learn about peers from connected peer."""
         peers = msg.payload.get("peers", [])
+        new_peers = 0
         for p in peers:
             peer_id = p.get("peer_id", "")
             if peer_id and peer_id != self.peer_id and peer_id not in self._peer_connections:
@@ -869,14 +873,115 @@ class MycellmNode:
                 if addrs:
                     caps = Capabilities.from_dict(p.get("capabilities", {}))
                     self.registry.register(peer_id, capabilities=caps, addresses=addrs)
-                    # Try to connect to newly discovered peers
+                    new_peers += 1
+                    # Try to connect — pass peer_id for dedup
                     for addr in addrs:
                         if ":" in addr:
                             host, port_str = addr.rsplit(":", 1)
                             try:
-                                self.peer_manager.add_peer(host, int(port_str))
+                                self.peer_manager.add_peer(host, int(port_str), peer_id=peer_id)
                             except (ValueError, AttributeError):
                                 pass
+        if new_peers:
+            self.activity.record(
+                EventType.PEER_EXCHANGE_RECEIVED,
+                peers_discovered=new_peers,
+                from_peer=msg.from_peer[:16],
+            )
+
+    def _build_peer_exchange_list(self, exclude_peer_id: str = "") -> list[dict]:
+        """Build a list of known peers for peer exchange, excluding a specific peer."""
+        seen: set[str] = {self.peer_id}
+        if exclude_peer_id:
+            seen.add(exclude_peer_id)
+
+        peers: list[dict] = []
+
+        # Source 1: Registry entries (QUIC-connected peers with addresses)
+        for entry in self.registry.connected_peers():
+            if entry.peer_id in seen or not entry.addresses:
+                continue
+            seen.add(entry.peer_id)
+            peers.append({
+                "peer_id": entry.peer_id,
+                "addresses": entry.addresses,
+                "capabilities": entry.capabilities.to_dict(),
+            })
+
+        # Source 2: node_registry (HTTP-announced peers — may have api_addr)
+        for peer_id, info in self.node_registry.items():
+            if peer_id in seen or info.get("status") != "approved":
+                continue
+            api_addr = info.get("api_addr", "")
+            if not api_addr:
+                continue
+            host = api_addr.split(":")[0]
+            seen.add(peer_id)
+            caps = info.get("capabilities", {})
+            peers.append({
+                "peer_id": peer_id,
+                "addresses": [f"{host}:8421"],
+                "capabilities": caps if isinstance(caps, dict) else {},
+            })
+
+        return peers
+
+    async def _peer_exchange_broadcast_loop(self) -> None:
+        """Periodically broadcast known peer list to all connected peers.
+
+        Uses jittered backoff: starts fast (5-10s) then grows toward the
+        configured interval, so newly joined peers discover each other quickly.
+        """
+        import random
+        from mycellm.transport.messages import peer_exchange
+
+        max_interval = self._settings.peer_exchange_interval
+        interval = 5 + random.random() * 5  # first run: 5-10s jitter
+
+        while self._running:
+            try:
+                await asyncio.sleep(interval)
+
+                sent_to: set[str] = set()
+
+                for peer_id, conn in list(self._peer_connections.items()):
+                    if peer_id in sent_to:
+                        continue
+                    peer_list = self._build_peer_exchange_list(exclude_peer_id=peer_id)
+                    if not peer_list:
+                        continue
+                    try:
+                        msg = peer_exchange(self.peer_id, peer_list)
+                        await conn.send(msg)
+                        sent_to.add(peer_id)
+                    except Exception as e:
+                        logger.debug(f"Peer exchange to {peer_id[:16]} failed: {e}")
+
+                for peer in self.peer_manager.managed_peers.values():
+                    if peer.connection and peer.peer_id and peer.peer_id not in sent_to:
+                        peer_list = self._build_peer_exchange_list(exclude_peer_id=peer.peer_id)
+                        if not peer_list:
+                            continue
+                        try:
+                            msg = peer_exchange(self.peer_id, peer_list)
+                            await peer.connection.send(msg)
+                            sent_to.add(peer.peer_id)
+                        except Exception as e:
+                            logger.debug(f"Peer exchange to managed {peer.addr} failed: {e}")
+
+                if sent_to:
+                    logger.info(
+                        f"{styled_tag('P2P')} Peer exchange broadcast to {len(sent_to)} peers"
+                    )
+
+                # Jittered backoff toward max_interval
+                interval = min(interval * 1.5 + random.random() * 5, max_interval)
+
+            except asyncio.CancelledError:
+                return
+            except Exception as e:
+                logger.debug(f"Peer exchange broadcast error: {e}")
+                interval = min(interval * 1.5, max_interval)
 
     async def _start_dht(self) -> None:
         """Start the DHT discovery node."""
@@ -1046,7 +1151,14 @@ class MycellmNode:
             from mycellm.nat.discovery import NATDiscovery
             self.nat_discovery = NATDiscovery()
             await self.nat_discovery.start(local_port=self.quic_port)
-            logger.info(f"{styled_tag('NAT')} Discovery started ({self.nat_discovery.info.nat_type.value})")
+            nat_info = self.nat_discovery.info
+            logger.info(f"{styled_tag('NAT')} Discovery started ({nat_info.nat_type.value})")
+            self.activity.record(
+                EventType.NAT_DISCOVERED,
+                nat_type=nat_info.nat_type.value,
+                public_ip=nat_info.external_ip,
+                hole_punch="yes" if nat_info.nat_type.can_hole_punch else "no",
+            )
         except Exception as e:
             logger.debug(f"NAT discovery failed to start: {e}")
             self.nat_discovery = None
@@ -1069,6 +1181,9 @@ class MycellmNode:
         self._growth_task = asyncio.create_task(self._growth_snapshot_loop())
         self._growth_snapshots: dict = {}
 
+        # Start peer exchange broadcast (shares connected peer list for P2P discovery)
+        self._peer_exchange_task = asyncio.create_task(self._peer_exchange_broadcast_loop())
+
         # Initialize Prometheus metrics
         try:
             from mycellm.metrics import set_node_info
@@ -1081,6 +1196,7 @@ class MycellmNode:
         self.relay_manager = RelayManager(self.inference)
 
         logger.info(f"{styled_tag('NODE')} Swarm connected. Awaiting inference tasks.")
+        self.activity.record(EventType.NODE_STARTED, node_name=self._settings.node_name, peer_id=self.peer_id[:16])
 
         # Start API server (blocks)
         await self._start_api()
@@ -1236,10 +1352,32 @@ class MycellmNode:
     async def announce_capabilities(self) -> None:
         """Re-announce capabilities to all connected peers (e.g. after model load)."""
         from mycellm.transport.messages import peer_announce
+        # Include all routable IPs so LAN peers behind the same NAT can find each other
+        from mycellm.nat.discovery import _get_local_ip
+        addresses = set()
+        addresses.add(f"{_get_local_ip()}:{self.quic_port}")
+        try:
+            import subprocess
+            out = subprocess.check_output(["hostname", "-I"], timeout=2, text=True).strip()
+            for ip in out.split():
+                if ":" not in ip and not ip.startswith("127."):
+                    addresses.add(f"{ip}:{self.quic_port}")
+        except Exception:
+            pass  # macOS doesn't have hostname -I; _get_local_ip suffices
+        try:
+            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+                ip = info[4][0]
+                if not ip.startswith("127."):
+                    addresses.add(f"{ip}:{self.quic_port}")
+        except Exception:
+            pass
+        if self._settings.external_host:
+            addresses.add(f"{self._settings.external_host}:{self.quic_port}")
+        addresses = list(addresses)
 
         msg = peer_announce(
             self.peer_id,
-            [f"{self.api_host}:{self.quic_port}"],
+            addresses,
             self.capabilities.to_dict(),
         )
         for conn in self._peer_connections.values():
@@ -1273,6 +1411,10 @@ class MycellmNode:
             return
         self._running = False
         logger.info(f"{styled_tag('NODE')} Shutting down gracefully...")
+
+        # Cancel peer exchange broadcast
+        if self._peer_exchange_task and not self._peer_exchange_task.done():
+            self._peer_exchange_task.cancel()
 
         # Save peer cache
         self._save_peer_cache()
@@ -1376,6 +1518,46 @@ class MycellmNode:
                 continue
 
         return None
+
+    async def route_inference_stream(self, model: str, messages: list[dict], **kwargs):
+        """Route streaming inference to a peer. Yields text chunks."""
+        effective_model = model
+        if not model and self.model_resolver:
+            resolved = self.model_resolver.resolve(
+                "", self.inference.loaded_models,
+                fleet_registry=self.node_registry,
+            )
+            if resolved:
+                effective_model = resolved[0].model_name
+
+        from mycellm.transport.messages import inference_request
+        targets = self.chain_builder.route(effective_model)
+        if not targets:
+            return
+
+        for target in targets:
+            if target.entry.connection is None:
+                continue
+
+            req_msg = inference_request(
+                self.peer_id, effective_model, messages,
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=kwargs.get("max_tokens", 2048),
+                stream=True,
+            )
+
+            try:
+                async for resp in target.entry.connection.request_stream(req_msg):
+                    text = resp.payload.get("text", "")
+                    finish_reason = resp.payload.get("finish_reason")
+                    if text:
+                        yield {"text": text, "finish_reason": finish_reason, "peer_id": target.peer_id}
+                target.entry.failure_count = max(0, target.entry.failure_count - 1)
+                return
+            except Exception as e:
+                target.entry.failure_count += 1
+                logger.debug(f"Peer {target.peer_id[:16]} stream routing failed: {e}")
+                continue
 
     def get_operational_mode(self) -> str:
         """Auto-detect operational mode from node state."""

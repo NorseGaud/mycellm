@@ -1,0 +1,68 @@
+# mycellm Caddy Configuration
+# ============================
+# This file is a reference copy of the mycellm blocks in the docker-box
+# Caddyfile (/etc/caddy/Caddyfile on 96.126.98.204).
+#
+# Domain strategy:
+#   .ai  = marketing site (/, /about, /join, /stats, /chat)
+#   .dev = developer/docs (subdomains only; bare mycellm.dev -> .ai)
+#
+# Both .ai and docs.mycellm.dev serve from the same SSG build
+# at /srv/www/mycellm.ai — routing is handled at the Caddy level.
+
+# --- Redirects: non-canonical marketing domains -> mycellm.ai ---
+
+www.mycellm.ai, mycellm.com, www.mycellm.com, mycellm.org, www.mycellm.org {
+	redir https://mycellm.ai{uri} permanent
+}
+
+# --- mycellm.ai: marketing only ---
+
+mycellm.ai {
+	import security_headers
+
+	# Redirect doc + legal paths to docs.mycellm.dev
+	@docs path /quickstart/* /api/* /architecture/* /cli/* /config/* /integrations/* /privacy /privacy/* /terms /terms/*
+	redir @docs https://docs.mycellm.dev{uri} permanent
+
+	root * /srv/www/mycellm.ai
+	file_server
+	encode gzip
+	try_files {path} {path}/ {path}/index.html
+}
+
+# --- mycellm.dev: bare domain -> .ai ---
+
+mycellm.dev, www.mycellm.dev {
+	redir https://mycellm.ai{uri} permanent
+}
+
+# --- docs.mycellm.dev: developer documentation ---
+
+docs.mycellm.dev {
+	import security_headers
+	root * /srv/www/mycellm.ai
+	file_server
+	encode gzip
+	try_files {path} {path}/ {path}/index.html
+
+	# Docs root -> quickstart
+	redir / /quickstart/install/ temporary
+}
+
+docs.mycellm.ai {
+	redir https://docs.mycellm.dev{uri} permanent
+}
+
+# --- api.mycellm.dev: bootstrap node API ---
+
+api.mycellm.dev {
+	import security_headers
+	reverse_proxy localhost:8420
+}
+
+# --- stats.mycellm.dev -> mycellm.ai/stats ---
+
+stats.mycellm.dev {
+	redir * https://mycellm.ai/stats permanent
+}
