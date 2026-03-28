@@ -1358,7 +1358,7 @@ class MycellmNode:
         addresses.add(f"{_get_local_ip()}:{self.quic_port}")
         try:
             import subprocess
-            out = subprocess.check_output(["hostname", "-I"], timeout=2, text=True).strip()
+            out = subprocess.check_output(["hostname", "-I"], timeout=2, text=True, stderr=subprocess.DEVNULL).strip()
             for ip in out.split():
                 if ":" not in ip and not ip.startswith("127."):
                     addresses.add(f"{ip}:{self.quic_port}")
