@@ -96,21 +96,26 @@ class PeerManager:
                 peer.connection = None
             peer.state = PeerConnectionState.DISCONNECTED
 
+    MAX_MANAGED_PEERS = 20  # hard cap to prevent FD exhaustion
+
     def add_peer(self, host: str, port: int, peer_id: str = "") -> None:
         """Add a new peer to manage (e.g. discovered via DHT or peer exchange).
 
-        If peer_id is provided and we already have a routable connection to
-        that peer (via any address), the new address is skipped to avoid
-        redundant connections.
+        If peer_id is provided and we already have ANY connection attempt
+        (routable or not) to that peer, the new address is skipped.
         """
         key = f"{host}:{port}"
         if key in self._managed_peers or not self._running:
             return
 
-        # Dedup by peer_id — don't connect to a second address for the same peer
+        # Hard cap — prevent FD exhaustion from connection storms
+        if len(self._managed_peers) >= self.MAX_MANAGED_PEERS:
+            return
+
+        # Dedup by peer_id — only ONE address per peer
         if peer_id:
             for existing in self._managed_peers.values():
-                if existing.peer_id == peer_id and existing.state == PeerConnectionState.ROUTABLE:
+                if existing.peer_id == peer_id:
                     return
 
         peer = ManagedPeer(host, port)
@@ -137,6 +142,8 @@ class PeerManager:
             result.append(info)
         return result
 
+    MAX_RECONNECT_ATTEMPTS = 5  # give up after this many failures
+
     async def _manage_peer(self, peer: ManagedPeer) -> None:
         """Main loop for a single peer: connect, heartbeat, reconnect."""
         while self._running:
@@ -145,6 +152,7 @@ class PeerManager:
                     await self._connect_peer(peer)
 
                 if peer.state == PeerConnectionState.ROUTABLE:
+                    peer.reconnect_attempts = 0  # reset on successful connection
                     await self._heartbeat_loop(peer)
 
             except asyncio.CancelledError:
@@ -154,6 +162,12 @@ class PeerManager:
                 peer.state = PeerConnectionState.DISCONNECTED
 
             if not self._running:
+                return
+
+            # Give up on peers that repeatedly fail (prevents FD leak)
+            if peer.reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
+                logger.info(f"Giving up on {peer.addr} after {peer.reconnect_attempts} attempts")
+                self._managed_peers.pop(peer.addr, None)
                 return
 
             # Wait before reconnecting
@@ -234,6 +248,11 @@ class PeerManager:
                         connection=conn,
                         capabilities=peer_hello.capabilities,
                     )
+
+                    # Record address success for scoring
+                    entry = self._node.registry.get(peer_hello.peer_id)
+                    if entry:
+                        entry.record_address_success(peer.addr)
 
                     logger.info(
                         f"{styled_tag('P2P')} Connected to {peer.addr} "

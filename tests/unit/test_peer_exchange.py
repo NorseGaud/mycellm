@@ -71,7 +71,8 @@ class TestBuildPeerExchangeList:
         node.registry._peers[peer_a] = _make_peer_entry(peer_a, ["10.0.0.2:8421"], ["qwen-7b"])
         node.registry._peers[peer_b] = _make_peer_entry(peer_b, ["10.0.0.3:8421"], ["llama-3b"])
 
-        result = MycellmNode._build_peer_exchange_list(node, exclude_peer_id=peer_a)
+        # recipient_addr is local so private IPs are included
+        result = MycellmNode._build_peer_exchange_list(node, exclude_peer_id=peer_a, recipient_addr="10.0.0.1:8421")
         assert len(result) == 1
         assert result[0]["peer_id"] == peer_b
 
@@ -107,9 +108,21 @@ class TestBuildPeerExchangeList:
             "capabilities": {"role": "seeder"},
         }
 
-        result = MycellmNode._build_peer_exchange_list(node)
+        # Local recipient — private IPs are included
+        result = MycellmNode._build_peer_exchange_list(node, recipient_addr="192.168.1.1:8421")
         assert len(result) == 1
         assert result[0]["addresses"] == ["192.168.1.100:8421"]
+
+    def test_filters_private_addrs_for_public_recipient(self):
+        from mycellm.node import MycellmNode
+        node = _make_node()
+
+        peer_id = "peer_priv_000000000000000000000"
+        node.registry._peers[peer_id] = _make_peer_entry(peer_id, ["10.0.0.5:8421"], ["qwen-7b"])
+
+        # Public recipient — private IPs should be filtered
+        result = MycellmNode._build_peer_exchange_list(node, recipient_addr="203.0.113.1:8421")
+        assert len(result) == 0
 
 
 class TestHandlePeerExchange:
@@ -203,8 +216,7 @@ class TestPeerManagerDedup:
         for t in pm._tasks:
             t.cancel()
 
-    @pytest.mark.asyncio
-    async def test_add_peer_allows_same_peer_id_if_disconnected(self):
+    def test_add_peer_rejects_same_peer_id_even_if_disconnected(self):
         from mycellm.transport.peer_manager import PeerManager, ManagedPeer, PeerConnectionState
         node = MagicMock()
         pm = PeerManager(node)
@@ -215,8 +227,6 @@ class TestPeerManagerDedup:
         existing.state = PeerConnectionState.DISCONNECTED
         pm._managed_peers["10.0.0.1:8421"] = existing
 
-        # Same peer_id but existing is disconnected — allow retry on new address
+        # Same peer_id — now rejected even if disconnected (prevents FD exhaustion)
         pm.add_peer("10.0.0.2", 8421, peer_id="peer_abc")
-        assert "10.0.0.2:8421" in pm._managed_peers
-        for t in pm._tasks:
-            t.cancel()
+        assert "10.0.0.2:8421" not in pm._managed_peers

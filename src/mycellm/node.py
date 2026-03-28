@@ -874,8 +874,10 @@ class MycellmNode:
                     caps = Capabilities.from_dict(p.get("capabilities", {}))
                     self.registry.register(peer_id, capabilities=caps, addresses=addrs)
                     new_peers += 1
-                    # Try to connect — pass peer_id for dedup
-                    for addr in addrs:
+                    # Try to connect — prefer previously successful addresses
+                    reg_entry = self.registry.get(peer_id)
+                    sorted_addrs = reg_entry.sorted_addresses() if reg_entry else addrs
+                    for addr in sorted_addrs:
                         if ":" in addr:
                             host, port_str = addr.rsplit(":", 1)
                             try:
@@ -889,11 +891,30 @@ class MycellmNode:
                 from_peer=msg.from_peer[:16],
             )
 
-    def _build_peer_exchange_list(self, exclude_peer_id: str = "") -> list[dict]:
-        """Build a list of known peers for peer exchange, excluding a specific peer."""
+    @staticmethod
+    def _is_private_addr(addr: str) -> bool:
+        """Check if an address uses a private/link-local IP."""
+        host = addr.split(":")[0]
+        return (host.startswith("10.") or host.startswith("192.168.") or
+                host.startswith("172.16.") or host.startswith("172.17.") or
+                host.startswith("172.18.") or host.startswith("172.19.") or
+                host.startswith("172.2") or host.startswith("172.3") or
+                host.startswith("100.") or host.startswith("169.254.") or
+                host.startswith("127.") or host.startswith("fd") or host.startswith("fe80"))
+
+    def _build_peer_exchange_list(self, exclude_peer_id: str = "", recipient_addr: str = "") -> list[dict]:
+        """Build a list of known peers for peer exchange, excluding a specific peer.
+
+        If the recipient is on a different public IP (not same NAT), private
+        addresses are stripped since they'd be unreachable anyway.
+        """
         seen: set[str] = {self.peer_id}
         if exclude_peer_id:
             seen.add(exclude_peer_id)
+
+        # Determine if recipient shares our NAT (same public IP = likely same LAN)
+        # If so, include private addresses; otherwise filter them out
+        recipient_is_local = MycellmNode._is_private_addr(recipient_addr) if recipient_addr else False
 
         peers: list[dict] = []
 
@@ -901,10 +922,15 @@ class MycellmNode:
         for entry in self.registry.connected_peers():
             if entry.peer_id in seen or not entry.addresses:
                 continue
+            addrs = entry.addresses
+            if not recipient_is_local:
+                addrs = [a for a in addrs if not MycellmNode._is_private_addr(a)]
+            if not addrs:
+                continue
             seen.add(entry.peer_id)
             peers.append({
                 "peer_id": entry.peer_id,
-                "addresses": entry.addresses,
+                "addresses": addrs,
                 "capabilities": entry.capabilities.to_dict(),
             })
 
@@ -916,11 +942,14 @@ class MycellmNode:
             if not api_addr:
                 continue
             host = api_addr.split(":")[0]
+            addr = f"{host}:8421"
+            if not recipient_is_local and MycellmNode._is_private_addr(addr):
+                continue
             seen.add(peer_id)
             caps = info.get("capabilities", {})
             peers.append({
                 "peer_id": peer_id,
-                "addresses": [f"{host}:8421"],
+                "addresses": [addr],
                 "capabilities": caps if isinstance(caps, dict) else {},
             })
 
@@ -947,7 +976,11 @@ class MycellmNode:
                 for peer_id, conn in list(self._peer_connections.items()):
                     if peer_id in sent_to:
                         continue
-                    peer_list = self._build_peer_exchange_list(exclude_peer_id=peer_id)
+                    # Get recipient address for privacy filtering
+                    recip_addr = ""
+                    if conn.protocol and conn.protocol._peer_addr:
+                        recip_addr = f"{conn.protocol._peer_addr[0]}:8421"
+                    peer_list = self._build_peer_exchange_list(exclude_peer_id=peer_id, recipient_addr=recip_addr)
                     if not peer_list:
                         continue
                     try:
@@ -982,6 +1015,37 @@ class MycellmNode:
             except Exception as e:
                 logger.debug(f"Peer exchange broadcast error: {e}")
                 interval = min(interval * 1.5, max_interval)
+
+    async def _model_prewarm_loop(self) -> None:
+        """Periodically ping loaded models to keep them paged into memory.
+
+        On machines with limited RAM, the OS pages out idle model weights.
+        A lightweight warmup every 10 minutes prevents cold-start latency.
+        """
+        from mycellm.inference.base import InferenceRequest
+
+        await asyncio.sleep(120)  # let models finish loading first
+
+        while self._running:
+            try:
+                for model in self.inference.loaded_models:
+                    if not self._running:
+                        return
+                    try:
+                        req = InferenceRequest(
+                            messages=[{"role": "user", "content": "hi"}],
+                            model=model.name,
+                            temperature=0.0,
+                            max_tokens=1,
+                        )
+                        await self.inference.generate(req)
+                    except Exception:
+                        pass  # model busy or errored — skip
+                await asyncio.sleep(600)  # every 10 minutes
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                await asyncio.sleep(600)
 
     async def _start_dht(self) -> None:
         """Start the DHT discovery node."""
@@ -1183,6 +1247,9 @@ class MycellmNode:
 
         # Start peer exchange broadcast (shares connected peer list for P2P discovery)
         self._peer_exchange_task = asyncio.create_task(self._peer_exchange_broadcast_loop())
+
+        # Start model prewarm (keeps weights in RAM on memory-constrained devices)
+        self._prewarm_task = asyncio.create_task(self._model_prewarm_loop())
 
         # Initialize Prometheus metrics
         try:
