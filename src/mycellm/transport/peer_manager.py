@@ -25,9 +25,10 @@ class PeerConnectionState(str, Enum):
 class ManagedPeer:
     """Tracks state for a single outbound peer connection."""
 
-    def __init__(self, host: str, port: int):
+    def __init__(self, host: str, port: int, is_bootstrap: bool = False):
         self.host = host
         self.port = port
+        self.is_bootstrap = is_bootstrap  # bootstrap peers never give up
         self.state = PeerConnectionState.DISCONNECTED
         self.connection: PeerConnection | None = None
         self.peer_id: str = ""
@@ -73,7 +74,7 @@ class PeerManager:
         for host, port in bootstrap_peers:
             key = f"{host}:{port}"
             if key not in self._managed_peers:
-                peer = ManagedPeer(host, port)
+                peer = ManagedPeer(host, port, is_bootstrap=True)
                 self._managed_peers[key] = peer
                 task = asyncio.create_task(self._manage_peer(peer))
                 self._tasks.append(task)
@@ -164,8 +165,9 @@ class PeerManager:
             if not self._running:
                 return
 
-            # Give up on peers that repeatedly fail (prevents FD leak)
-            if peer.reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
+            # Give up on discovered peers that repeatedly fail (prevents FD leak).
+            # Bootstrap peers NEVER give up — they're the node's network lifeline.
+            if not peer.is_bootstrap and peer.reconnect_attempts >= self.MAX_RECONNECT_ATTEMPTS:
                 logger.info(f"Giving up on {peer.addr} after {peer.reconnect_attempts} attempts")
                 self._managed_peers.pop(peer.addr, None)
                 return
