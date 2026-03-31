@@ -644,6 +644,40 @@ class MycellmNode:
 
         model_name = self.inference.resolve_model_name(model)
         if not model_name:
+            # Model not loaded locally — try relaying to a peer that has it
+            if stream:
+                try:
+                    relayed = False
+                    async for chunk in self.route_inference_stream(model, messages, **{
+                        "temperature": payload.get("temperature", 0.7),
+                        "max_tokens": payload.get("max_tokens", 2048),
+                    }):
+                        text = chunk.get("text", "")
+                        if text:
+                            chunk_msg = inference_stream_chunk(self.peer_id, msg.id, text, chunk.get("finish_reason"))
+                            await protocol.send_message(chunk_msg)
+                            relayed = True
+                    if relayed:
+                        done_msg = inference_done(self.peer_id, msg.id)
+                        await protocol.send_message(done_msg)
+                        return
+                except Exception as e:
+                    logger.debug(f"Relay stream failed: {e}")
+            else:
+                result = await self.route_inference(model, messages,
+                    temperature=payload.get("temperature", 0.7),
+                    max_tokens=payload.get("max_tokens", 2048),
+                )
+                if result:
+                    text = result.get("text", "") if isinstance(result, dict) else ""
+                    resp = inference_response(
+                        self.peer_id, msg.id, text, model,
+                        result.get("prompt_tokens", 0) if isinstance(result, dict) else 0,
+                        result.get("completion_tokens", 0) if isinstance(result, dict) else 0,
+                    )
+                    await protocol.reply_on_stream(stream_id, resp)
+                    return
+
             err = error_message(self.peer_id, msg.id, ErrorCode.MODEL_UNAVAILABLE)
             await protocol.reply_on_stream(stream_id, err)
             return
