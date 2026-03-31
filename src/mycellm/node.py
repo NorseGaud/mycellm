@@ -956,27 +956,45 @@ class MycellmNode:
         return peers
 
     async def _peer_exchange_broadcast_loop(self) -> None:
-        """Periodically broadcast known peer list to all connected peers.
+        """Broadcast known peer list when the connected peer set changes.
 
-        Uses jittered backoff: starts fast (5-10s) then grows toward the
-        configured interval, so newly joined peers discover each other quickly.
+        Checks periodically; only sends if the peer set differs from last broadcast.
+        Uses jittered fast start for responsiveness, then settles to configured interval.
         """
         import random
         from mycellm.transport.messages import peer_exchange
 
         max_interval = self._settings.peer_exchange_interval
-        interval = 5 + random.random() * 5  # first run: 5-10s jitter
+        interval = 5 + random.random() * 5  # first check: 5-10s
+        last_peer_set: set[str] = set()
 
         while self._running:
             try:
                 await asyncio.sleep(interval)
+
+                # Check if peer set changed
+                current_peers = set(self._peer_connections.keys())
+                for p in self.peer_manager.managed_peers.values():
+                    if p.peer_id and p.connection:
+                        current_peers.add(p.peer_id)
+
+                if current_peers == last_peer_set and len(current_peers) > 0:
+                    # No change — extend interval, skip broadcast
+                    interval = min(interval * 1.5, max_interval)
+                    continue
+
+                last_peer_set = current_peers.copy()
+
+                if len(current_peers) < 2:
+                    # Need at least 2 peers to exchange
+                    interval = min(interval * 1.5 + random.random() * 5, max_interval)
+                    continue
 
                 sent_to: set[str] = set()
 
                 for peer_id, conn in list(self._peer_connections.items()):
                     if peer_id in sent_to:
                         continue
-                    # Get recipient address for privacy filtering
                     recip_addr = ""
                     if conn.protocol and conn.protocol._peer_addr:
                         recip_addr = f"{conn.protocol._peer_addr[0]}:8421"
@@ -1007,8 +1025,8 @@ class MycellmNode:
                         f"{styled_tag('P2P')} Peer exchange broadcast to {len(sent_to)} peers"
                     )
 
-                # Jittered backoff toward max_interval
-                interval = min(interval * 1.5 + random.random() * 5, max_interval)
+                # After a change, reset to fast interval for responsive follow-up
+                interval = 10 + random.random() * 5
 
             except asyncio.CancelledError:
                 return
@@ -1021,6 +1039,7 @@ class MycellmNode:
 
         On machines with limited RAM, the OS pages out idle model weights.
         A lightweight warmup every 10 minutes prevents cold-start latency.
+        Skips if model is already busy (active inference) to avoid contention.
         """
         from mycellm.inference.base import InferenceRequest
 
@@ -1028,10 +1047,14 @@ class MycellmNode:
 
         while self._running:
             try:
+                if self.inference.is_overloaded:
+                    await asyncio.sleep(600)
+                    continue
                 for model in self.inference.loaded_models:
                     if not self._running:
                         return
                     try:
+                        # Minimal inference — 1 token, no queue contention check
                         req = InferenceRequest(
                             messages=[{"role": "user", "content": "hi"}],
                             model=model.name,
@@ -1039,6 +1062,7 @@ class MycellmNode:
                             max_tokens=1,
                         )
                         await self.inference.generate(req)
+                        logger.debug(f"Prewarm: {model.name} OK")
                     except Exception:
                         pass  # model busy or errored — skip
                 await asyncio.sleep(600)  # every 10 minutes
@@ -1416,10 +1440,12 @@ class MycellmNode:
             except Exception as e:
                 logger.debug(f"Growth snapshot error: {e}")
 
-    async def announce_capabilities(self) -> None:
-        """Re-announce capabilities to all connected peers (e.g. after model load)."""
-        from mycellm.transport.messages import peer_announce
-        # Include all routable IPs so LAN peers behind the same NAT can find each other
+    def _discover_local_addresses(self) -> list[str]:
+        """Discover all routable LAN addresses. Cached for 5 minutes."""
+        now = time.time()
+        if hasattr(self, "_cached_addresses") and now - self._cached_addresses_at < 300:
+            return self._cached_addresses
+
         from mycellm.nat.discovery import _get_local_ip
         addresses = set()
         addresses.add(f"{_get_local_ip()}:{self.quic_port}")
@@ -1430,7 +1456,7 @@ class MycellmNode:
                 if ":" not in ip and not ip.startswith("127."):
                     addresses.add(f"{ip}:{self.quic_port}")
         except Exception:
-            pass  # macOS doesn't have hostname -I; _get_local_ip suffices
+            pass
         try:
             for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
                 ip = info[4][0]
@@ -1440,7 +1466,16 @@ class MycellmNode:
             pass
         if self._settings.external_host:
             addresses.add(f"{self._settings.external_host}:{self.quic_port}")
-        addresses = list(addresses)
+
+        result = list(addresses)
+        self._cached_addresses = result
+        self._cached_addresses_at = now
+        return result
+
+    async def announce_capabilities(self) -> None:
+        """Re-announce capabilities to all connected peers (e.g. after model load)."""
+        from mycellm.transport.messages import peer_announce
+        addresses = self._discover_local_addresses()
 
         msg = peer_announce(
             self.peer_id,
