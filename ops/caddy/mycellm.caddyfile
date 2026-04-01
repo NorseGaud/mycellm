@@ -31,10 +31,20 @@ mycellm.ai {
 	try_files {path} {path}/ {path}/index.html
 }
 
-# --- mycellm.dev: bare domain -> .ai ---
+# --- mycellm.dev: install scripts served, rest -> .ai ---
 
 mycellm.dev, www.mycellm.dev {
-	redir https://mycellm.ai{uri} permanent
+	handle /install.sh {
+		root * /srv/www/mycellm.ai
+		file_server
+	}
+	handle /install.ps1 {
+		root * /srv/www/mycellm.ai
+		file_server
+	}
+	handle {
+		redir https://mycellm.ai{uri} permanent
+	}
 }
 
 # --- docs.mycellm.dev: developer documentation ---
