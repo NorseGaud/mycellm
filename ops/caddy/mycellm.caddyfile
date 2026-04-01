@@ -41,6 +41,11 @@ mycellm.dev, www.mycellm.dev {
 
 docs.mycellm.dev {
 	import security_headers
+
+	# Marketing pages belong on .ai, not docs
+	@notdocs path /chat /chat/* /join /join/* /about /about/* /stats /stats/*
+	redir @notdocs https://mycellm.ai{uri} permanent
+
 	root * /srv/www/mycellm.ai
 	file_server
 	encode gzip
