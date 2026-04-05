@@ -37,6 +37,10 @@ class LlamaCppBackend(InferenceBackend):
         n_gpu_layers = kwargs.get("n_gpu_layers", -1)  # -1 = auto
         progress_callback = kwargs.get("progress_callback")
 
+        # KV cache quantization — reduces memory usage ~2x with minimal quality loss
+        flash_attn = kwargs.get("flash_attn", True)
+        kv_quant = kwargs.get("kv_cache_quant", "q8_0")
+
         logger.info(f"Loading model {model_name} from {model_path}")
 
         # Use progress_callback if the installed llama-cpp-python supports it
@@ -49,16 +53,44 @@ class LlamaCppBackend(InferenceBackend):
                     return True
                 extra_kwargs["progress_callback"] = _on_progress
 
-        llm = await asyncio.to_thread(
-            Llama,
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-            **extra_kwargs,
-        )
+        # Flash attention (Metal/CUDA optimized attention kernel)
+        if flash_attn:
+            extra_kwargs["flash_attn"] = True
+
+        # KV cache quantization — type_k and type_v accept GGML type constants
+        if kv_quant and kv_quant != "none":
+            try:
+                from llama_cpp import GGML_TYPE_Q8_0, GGML_TYPE_Q4_0
+                kv_types = {"q8_0": GGML_TYPE_Q8_0, "q4_0": GGML_TYPE_Q4_0}
+                if kv_quant in kv_types:
+                    extra_kwargs["type_k"] = kv_types[kv_quant]
+                    extra_kwargs["type_v"] = kv_types[kv_quant]
+                    logger.info(f"KV cache quantization: {kv_quant}")
+            except ImportError:
+                pass  # older llama-cpp-python without GGML type constants
+
+        try:
+            llm = await asyncio.to_thread(
+                Llama,
+                model_path=model_path,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+                **extra_kwargs,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            # Detect model load failures — often caused by unsupported architecture
+            if "failed to load model" in err_msg.lower():
+                model_name_short = model_path.split("/")[-1]
+                raise RuntimeError(
+                    f"Failed to load {model_name_short}. This may be an unsupported model "
+                    f"architecture. Try: pip install --upgrade llama-cpp-python"
+                ) from e
+            raise
+
         self._models[model_name] = llm
-        logger.info(f"Model {model_name} loaded")
+        logger.info(f"Model {model_name} loaded (flash_attn={flash_attn}, kv_quant={kv_quant})")
 
     async def unload_model(self, model_name: str) -> None:
         model = self._models.pop(model_name, None)
@@ -83,6 +115,12 @@ class LlamaCppBackend(InferenceBackend):
             extra_kwargs["seed"] = request.seed
         if request.response_format:
             extra_kwargs["response_format"] = request.response_format
+        if request.grammar:
+            try:
+                from llama_cpp import LlamaGrammar
+                extra_kwargs["grammar"] = LlamaGrammar.from_string(request.grammar)
+            except (ImportError, Exception) as e:
+                logger.warning(f"Grammar constraint ignored: {e}")
         response = await asyncio.to_thread(
             llm.create_chat_completion,
             messages=request.messages,
@@ -127,6 +165,12 @@ class LlamaCppBackend(InferenceBackend):
             extra_kwargs["seed"] = request.seed
         if request.response_format:
             extra_kwargs["response_format"] = request.response_format
+        if request.grammar:
+            try:
+                from llama_cpp import LlamaGrammar
+                extra_kwargs["grammar"] = LlamaGrammar.from_string(request.grammar)
+            except (ImportError, Exception) as e:
+                logger.warning(f"Grammar constraint ignored: {e}")
 
         def _run_stream():
             try:

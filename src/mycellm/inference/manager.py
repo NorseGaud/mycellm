@@ -62,6 +62,8 @@ class InferenceManager:
         self._load_status: dict[str, dict] = {}  # model_name -> {status, phase, error, ...}
         # Model paths (for llama.cpp models)
         self._model_paths: dict[str, str] = {}  # model_name -> file path
+        # Request group tracking for batch cancellation
+        self._request_groups: dict[str, set[asyncio.Event]] = {}  # group -> cancel events
 
     @property
     def loaded_models(self) -> list[ModelCapability]:
@@ -205,6 +207,13 @@ class InferenceManager:
             else:
                 self._load_status[model_name]["phase"] = "connecting to API"
 
+            # Inject KV cache settings from config if not explicitly set
+            if backend_type == "llama.cpp" and "flash_attn" not in kwargs:
+                from mycellm.config import get_settings
+                s = get_settings()
+                kwargs.setdefault("flash_attn", s.flash_attn)
+                kwargs.setdefault("kv_cache_quant", s.kv_cache_quant)
+
             await backend.load_model(model_path, name=model_name, **kwargs)
 
             # Stop RSS monitor if it was running
@@ -332,6 +341,28 @@ class InferenceManager:
             lock.release()
         self._queue_depth[model_name] = max(0, self._queue_depth.get(model_name, 1) - 1)
 
+    async def cancel_group(self, group: str) -> int:
+        """Cancel all pending/active requests in a group. Returns count cancelled."""
+        events = self._request_groups.pop(group, set())
+        for event in events:
+            event.set()
+        return len(events)
+
+    def _register_request_group(self, request: InferenceRequest) -> asyncio.Event | None:
+        """Register a request's cancel event in its group. Returns the event."""
+        if not request.request_group:
+            return None
+        cancel_event = asyncio.Event()
+        self._request_groups.setdefault(request.request_group, set()).add(cancel_event)
+        return cancel_event
+
+    def _unregister_request_group(self, request: InferenceRequest, event: asyncio.Event | None):
+        """Remove a request's cancel event from its group."""
+        if event and request.request_group and request.request_group in self._request_groups:
+            self._request_groups[request.request_group].discard(event)
+            if not self._request_groups[request.request_group]:
+                del self._request_groups[request.request_group]
+
     async def generate(self, request: InferenceRequest) -> InferenceResult:
         """Run inference with per-model locking and global concurrency control."""
         model_name = self.resolve_model_name(request.model)
@@ -340,14 +371,30 @@ class InferenceManager:
 
         request.model = model_name
         backend = self._backends[model_name]
+        cancel_event = self._register_request_group(request)
 
-        await self._acquire_model(model_name)
+        # Speculative requests use shorter timeout to avoid blocking real work
+        orig_timeout = self._queue_timeout
+        if request.priority == "speculative":
+            self._queue_timeout = min(10.0, orig_timeout)
+
+        try:
+            await self._acquire_model(model_name)
+        except RuntimeError:
+            self._unregister_request_group(request, cancel_event)
+            raise
+        finally:
+            self._queue_timeout = orig_timeout
+
         self._active_count += 1
         try:
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("Request cancelled (group cancelled)")
             return await backend.generate(request)
         finally:
             self._active_count -= 1
             self._release_model(model_name)
+            self._unregister_request_group(request, cancel_event)
 
     async def generate_stream(
         self, request: InferenceRequest

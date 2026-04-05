@@ -56,6 +56,7 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float = 0
     seed: int | None = None
     response_format: dict | None = None  # {"type": "json_object"}
+    grammar: str | None = None  # GBNF grammar for constrained output (llama.cpp)
     mycellm: MycellmRouting | None = None
 
 
@@ -220,6 +221,7 @@ async def chat_completions(request: Request, body: ChatCompletionRequest):
             presence_penalty=body.presence_penalty,
             seed=body.seed,
             response_format=body.response_format,
+            grammar=body.grammar,
         )
         try:
             result = await node.inference.generate(req)
@@ -363,6 +365,7 @@ async def _stream_response(node, body: ChatCompletionRequest, messages: list[dic
                 presence_penalty=body.presence_penalty,
                 seed=body.seed,
                 response_format=body.response_format,
+                grammar=body.grammar,
             )
 
             # Send role delta first
@@ -616,6 +619,82 @@ async def _route_via_fleet(
             continue
 
     return None
+
+
+@router.get("/models/capabilities")
+async def model_capabilities(request: Request):
+    """List all available models with detailed capabilities.
+
+    Returns model metadata (params, quantization, context length, features,
+    throughput, queue depth, source) for intelligent routing decisions.
+    """
+    node = request.app.state.node
+    models = []
+
+    # Local models — full detail
+    for m in node.inference.loaded_models:
+        queue = node.inference.queue_status.get(m.name, 0)
+        models.append({
+            "id": m.name,
+            "source": "local",
+            "status": "loaded",
+            "param_count_b": m.param_count_b,
+            "quantization": m.quant,
+            "context_length": m.ctx_len,
+            "backend": m.backend,
+            "features": m.features or ["streaming"],
+            "throughput_tok_s": m.throughput_tok_s,
+            "tier": m.tier or "",
+            "tags": m.tags,
+            "queue_depth": queue,
+            "max_concurrent": node.inference._max_concurrent,
+            "supports_grammar": m.backend == "llama.cpp",
+        })
+
+    # QUIC peers
+    for entry in node.registry.connected_peers():
+        for m in entry.capabilities.models:
+            models.append({
+                "id": m.name,
+                "source": "quic",
+                "peer_id": entry.peer_id,
+                "status": "remote",
+                "param_count_b": m.param_count_b,
+                "quantization": m.quant,
+                "context_length": m.ctx_len,
+                "backend": m.backend,
+                "features": m.features or ["streaming"],
+                "throughput_tok_s": m.throughput_tok_s,
+                "tier": m.tier or "",
+                "tags": m.tags,
+                "supports_grammar": m.backend == "llama.cpp",
+            })
+
+    # Fleet nodes
+    for entry in node.node_registry.values():
+        if entry.get("status") != "approved":
+            continue
+        caps = entry.get("capabilities", {})
+        for m_data in caps.get("models", []):
+            m = m_data if isinstance(m_data, dict) else {"name": m_data}
+            models.append({
+                "id": m.get("name", ""),
+                "source": "fleet",
+                "peer_id": entry.get("peer_id", ""),
+                "node_name": entry.get("node_name", ""),
+                "status": "remote",
+                "param_count_b": m.get("param_count_b", 0),
+                "quantization": m.get("quant", ""),
+                "context_length": m.get("ctx_len", 4096),
+                "backend": m.get("backend", "unknown"),
+                "features": m.get("features", ["streaming"]),
+                "throughput_tok_s": m.get("throughput_tok_s", 0),
+                "tier": m.get("tier", ""),
+                "tags": m.get("tags", []),
+                "supports_grammar": m.get("backend", "") == "llama.cpp",
+            })
+
+    return {"models": models}
 
 
 @router.get("/models")
