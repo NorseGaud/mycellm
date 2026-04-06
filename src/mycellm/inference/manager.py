@@ -217,6 +217,8 @@ class InferenceManager:
                 kwargs.setdefault("kv_cache_quant_v", s.kv_cache_quant_v)
                 kwargs.setdefault("prompt_lookup", s.prompt_lookup)
                 kwargs.setdefault("n_threads", s.n_threads)
+                kwargs.setdefault("draft_model_path", s.draft_model_path)
+                kwargs.setdefault("draft_pred_tokens", s.draft_pred_tokens)
 
             await backend.load_model(model_path, name=model_name, **kwargs)
 

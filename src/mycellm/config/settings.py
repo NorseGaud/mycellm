@@ -103,6 +103,8 @@ class MycellmSettings(BaseSettings):
     kv_cache_quant_v: str = ""  # Value cache quantization (default: q4_0 for asymmetric)
     prompt_lookup: bool = False  # Enable LlamaPromptLookupDecoding for code-heavy generation
     n_threads: int = 0  # 0 = auto-detect (p-cores on Apple Silicon, physical cores on Linux)
+    draft_model_path: str = ""  # Path to a small GGUF model for speculative decoding
+    draft_pred_tokens: int = 8  # Number of tokens the draft model predicts per step
 
     # Relay backends — comma-separated OpenAI-compatible API endpoints
     # Format: "http://ipad.lan:8080,http://ollama.lan:11434"

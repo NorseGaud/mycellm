@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from pathlib import Path
 from typing import AsyncIterator
 
 from mycellm.inference.base import (
@@ -19,6 +20,66 @@ from mycellm.inference.base import (
 )
 
 logger = logging.getLogger("mycellm.inference")
+
+
+class LlamaGGUFDraftModel:
+    """Draft model for speculative decoding using a small GGUF model.
+
+    Loads a small model (e.g. 1.5B) and uses it to predict the next N tokens.
+    The main model then verifies these predictions in a single batch forward pass.
+    When predictions are accepted (typically 50-70% for code), the effective
+    throughput of the main model increases 1.5-2x.
+
+    Uses create_completion with prompt=input_ids for token prediction.
+    """
+
+    def __init__(self, model_path: str, num_pred_tokens: int = 8, n_ctx: int = 2048):
+        from llama_cpp import Llama
+
+        self.num_pred_tokens = num_pred_tokens
+        logger.info(f"Loading draft model: {Path(model_path).stem} (pred_tokens={num_pred_tokens})")
+        self._llm = Llama(
+            model_path=model_path,
+            n_ctx=n_ctx,
+            n_gpu_layers=-1,
+            flash_attn=True,
+            n_threads=_detect_optimal_threads() or 4,
+            logits_all=True,
+            verbose=False,
+        )
+        logger.info("Draft model loaded")
+
+    def __call__(self, input_ids, /, **kwargs):
+        """Predict next tokens given the current sequence."""
+        import numpy as np
+
+        if len(input_ids) == 0:
+            return np.array([], dtype=np.intc)
+
+        try:
+            # Use the model to predict next tokens via create_completion
+            # Feed input_ids as the prompt (token-level)
+            max_input = min(len(input_ids), self._llm.n_ctx() - self.num_pred_tokens - 1)
+            prompt_tokens = input_ids[-max_input:].tolist()
+
+            output = self._llm.create_completion(
+                prompt=prompt_tokens,
+                max_tokens=self.num_pred_tokens,
+                temperature=0.0,  # greedy for max acceptance
+                top_k=1,
+            )
+
+            # Extract generated token IDs from the output
+            text = output.get("choices", [{}])[0].get("text", "")
+            if text:
+                # Tokenize the output text to get token IDs
+                token_ids = self._llm.tokenize(text.encode(), add_bos=False)
+                return np.array(token_ids[:self.num_pred_tokens], dtype=np.intc)
+
+        except Exception as e:
+            logger.debug(f"Draft model prediction failed: {e}")
+
+        return np.array([], dtype=np.intc)
 
 
 def _detect_optimal_threads() -> int:
@@ -125,14 +186,24 @@ class LlamaCppBackend(InferenceBackend):
             extra_kwargs["n_threads_batch"] = n_threads
             logger.info(f"Threads: {n_threads}")
 
-        # Prompt lookup decoding — speeds up repetitive output (code, JSON)
-        if prompt_lookup:
+        # Speculative decoding — draft model predicts, main model verifies in batch
+        draft_model_path = kwargs.get("draft_model_path", "")
+        draft_pred_tokens = kwargs.get("draft_pred_tokens", 8)
+        if draft_model_path and Path(draft_model_path).exists():
+            extra_kwargs["draft_model"] = LlamaGGUFDraftModel(
+                model_path=draft_model_path,
+                num_pred_tokens=draft_pred_tokens,
+                n_ctx=min(n_ctx, 2048),
+            )
+            logger.info(f"Speculative decoding: draft={Path(draft_model_path).stem}")
+        elif prompt_lookup:
+            # Fallback: prompt lookup (n-gram based, no extra model)
             try:
                 from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
                 extra_kwargs["draft_model"] = LlamaPromptLookupDecoding(num_pred_tokens=10)
                 logger.info("Prompt lookup decoding enabled")
             except ImportError:
-                logger.warning("LlamaPromptLookupDecoding not available in this llama-cpp-python version")
+                pass
 
         try:
             llm = await asyncio.to_thread(
