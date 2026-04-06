@@ -16,6 +16,7 @@ router = APIRouter()
 
 # In-memory download tracker
 _downloads: dict[str, dict] = {}  # download_id -> {status, progress, ...}
+_download_tasks: dict[str, asyncio.Task] = {}  # download_id -> asyncio.Task
 
 
 def _hf_headers() -> dict[str, str]:
@@ -279,7 +280,8 @@ async def download_model(request: Request):
     }
 
     # Start download in background
-    asyncio.create_task(_do_download(download_id, repo_id, filename, dest_path, node, meta))
+    task = asyncio.create_task(_do_download(download_id, repo_id, filename, dest_path, node, meta))
+    _download_tasks[download_id] = task
 
     return {"download_id": download_id, "status": "started", "dest_path": str(dest_path)}
 
@@ -347,19 +349,54 @@ async def _do_download(download_id: str, repo_id: str, filename: str, dest_path:
             info["load_error"] = str(e)
             logger.warning(f"Auto-load failed for {filename}: {e}")
 
+    except asyncio.CancelledError:
+        info["status"] = "aborted"
+        logger.info(f"Download aborted: {filename}")
+        if dest_path.exists():
+            dest_path.unlink(missing_ok=True)
     except Exception as e:
         info["status"] = "failed"
         info["error"] = str(e)
         logger.error(f"Download failed for {filename}: {e}")
-        # Clean up partial file
         if dest_path.exists():
-            dest_path.unlink()
+            dest_path.unlink(missing_ok=True)
+    finally:
+        _download_tasks.pop(download_id, None)
 
 
 @router.get("/downloads")
 async def list_downloads(request: Request):
     """List active and recent downloads."""
     return {"downloads": list(_downloads.values())}
+
+
+@router.post("/downloads/abort")
+async def abort_download(request: Request):
+    """Abort an in-progress download."""
+    body = await request.json()
+    download_id = body.get("download_id", "")
+    if not download_id or download_id not in _downloads:
+        return {"error": "Unknown download_id"}
+
+    info = _downloads[download_id]
+    if info.get("status") != "downloading":
+        return {"error": "Download not in progress", "status": info.get("status")}
+
+    task = _download_tasks.get(download_id)
+    if task and not task.done():
+        task.cancel()
+
+    info["status"] = "aborted"
+
+    # Clean up partial file
+    dest = info.get("dest_path", "")
+    if dest:
+        from pathlib import Path
+        p = Path(dest)
+        if p.exists():
+            p.unlink(missing_ok=True)
+
+    return {"status": "aborted", "download_id": download_id}
 
 
 @router.get("/local")

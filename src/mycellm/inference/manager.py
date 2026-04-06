@@ -207,12 +207,16 @@ class InferenceManager:
             else:
                 self._load_status[model_name]["phase"] = "connecting to API"
 
-            # Inject KV cache settings from config if not explicitly set
+            # Inject inference settings from config if not explicitly set
             if backend_type == "llama.cpp" and "flash_attn" not in kwargs:
                 from mycellm.config import get_settings
                 s = get_settings()
                 kwargs.setdefault("flash_attn", s.flash_attn)
                 kwargs.setdefault("kv_cache_quant", s.kv_cache_quant)
+                kwargs.setdefault("kv_cache_quant_k", s.kv_cache_quant_k)
+                kwargs.setdefault("kv_cache_quant_v", s.kv_cache_quant_v)
+                kwargs.setdefault("prompt_lookup", s.prompt_lookup)
+                kwargs.setdefault("n_threads", s.n_threads)
 
             await backend.load_model(model_path, name=model_name, **kwargs)
 

@@ -21,6 +21,47 @@ from mycellm.inference.base import (
 logger = logging.getLogger("mycellm.inference")
 
 
+def _detect_optimal_threads() -> int:
+    """Detect optimal thread count based on platform.
+
+    Apple Silicon: use performance cores only (not efficiency cores).
+    Linux: use physical cores (not hyperthreaded logical cores).
+    """
+    import platform
+    import subprocess
+
+    try:
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            # Apple Silicon: p-core count via sysctl
+            r = subprocess.run(
+                ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                cores = int(r.stdout.strip())
+                logger.info(f"Apple Silicon detected: {cores} p-cores")
+                return cores
+
+        if platform.system() == "Linux":
+            import os
+            # Physical cores (not hyperthreaded)
+            try:
+                with open("/proc/cpuinfo") as f:
+                    cores = len(set(
+                        line.split(":")[1].strip()
+                        for line in f if line.startswith("physical id")
+                    )) or 1
+                logical = os.cpu_count() or 4
+                physical = max(1, logical // 2)  # rough estimate
+                return physical
+            except Exception:
+                return max(1, (os.cpu_count() or 4) // 2)
+    except Exception:
+        pass
+
+    return 0  # let llama.cpp decide
+
+
 class LlamaCppBackend(InferenceBackend):
     """Inference backend wrapping llama-cpp-python."""
 
@@ -37,13 +78,15 @@ class LlamaCppBackend(InferenceBackend):
         n_gpu_layers = kwargs.get("n_gpu_layers", -1)  # -1 = auto
         progress_callback = kwargs.get("progress_callback")
 
-        # KV cache quantization — reduces memory usage ~2x with minimal quality loss
         flash_attn = kwargs.get("flash_attn", True)
         kv_quant = kwargs.get("kv_cache_quant", "q8_0")
+        kv_quant_k = kwargs.get("kv_cache_quant_k", "")
+        kv_quant_v = kwargs.get("kv_cache_quant_v", "")
+        prompt_lookup = kwargs.get("prompt_lookup", False)
+        n_threads = kwargs.get("n_threads", 0)
 
         logger.info(f"Loading model {model_name} from {model_path}")
 
-        # Use progress_callback if the installed llama-cpp-python supports it
         extra_kwargs = {}
         if progress_callback:
             llama_params = inspect.signature(Llama.__init__).parameters
@@ -57,17 +100,39 @@ class LlamaCppBackend(InferenceBackend):
         if flash_attn:
             extra_kwargs["flash_attn"] = True
 
-        # KV cache quantization — type_k and type_v accept GGML type constants
-        if kv_quant and kv_quant != "none":
+        # Asymmetric KV cache quantization — keys need higher precision than values
+        # Default: K=q8_0 (higher precision), V=q4_0 (lower OK) — 59% less KV memory
+        try:
+            from llama_cpp import GGML_TYPE_Q8_0, GGML_TYPE_Q4_0
+            kv_types = {"q8_0": GGML_TYPE_Q8_0, "q4_0": GGML_TYPE_Q4_0}
+
+            effective_k = kv_quant_k or kv_quant or "q8_0"
+            effective_v = kv_quant_v or ("q4_0" if kv_quant_k or not kv_quant_v else kv_quant) or "q4_0"
+
+            if effective_k in kv_types:
+                extra_kwargs["type_k"] = kv_types[effective_k]
+            if effective_v in kv_types:
+                extra_kwargs["type_v"] = kv_types[effective_v]
+            logger.info(f"KV cache: K={effective_k}, V={effective_v}")
+        except ImportError:
+            pass
+
+        # Thread count — auto-detect p-cores on Apple Silicon
+        if n_threads <= 0:
+            n_threads = _detect_optimal_threads()
+        if n_threads > 0:
+            extra_kwargs["n_threads"] = n_threads
+            extra_kwargs["n_threads_batch"] = n_threads
+            logger.info(f"Threads: {n_threads}")
+
+        # Prompt lookup decoding — speeds up repetitive output (code, JSON)
+        if prompt_lookup:
             try:
-                from llama_cpp import GGML_TYPE_Q8_0, GGML_TYPE_Q4_0
-                kv_types = {"q8_0": GGML_TYPE_Q8_0, "q4_0": GGML_TYPE_Q4_0}
-                if kv_quant in kv_types:
-                    extra_kwargs["type_k"] = kv_types[kv_quant]
-                    extra_kwargs["type_v"] = kv_types[kv_quant]
-                    logger.info(f"KV cache quantization: {kv_quant}")
+                from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+                extra_kwargs["draft_model"] = LlamaPromptLookupDecoding(num_pred_tokens=10)
+                logger.info("Prompt lookup decoding enabled")
             except ImportError:
-                pass  # older llama-cpp-python without GGML type constants
+                logger.warning("LlamaPromptLookupDecoding not available in this llama-cpp-python version")
 
         try:
             llm = await asyncio.to_thread(

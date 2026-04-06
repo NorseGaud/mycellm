@@ -97,6 +97,12 @@ class MycellmSettings(BaseSettings):
     # Inference
     model_dir: Optional[Path] = None
     max_concurrent_inferences: int = 2
+    flash_attn: bool = True  # Metal/CUDA optimized attention kernel
+    kv_cache_quant: str = "q8_0"  # KV cache quantization: "none", "q8_0", "q4_0" (legacy, use k/v below)
+    kv_cache_quant_k: str = ""  # Key cache quantization (default: use kv_cache_quant)
+    kv_cache_quant_v: str = ""  # Value cache quantization (default: q4_0 for asymmetric)
+    prompt_lookup: bool = False  # Enable LlamaPromptLookupDecoding for code-heavy generation
+    n_threads: int = 0  # 0 = auto-detect (p-cores on Apple Silicon, physical cores on Linux)
 
     # Relay backends — comma-separated OpenAI-compatible API endpoints
     # Format: "http://ipad.lan:8080,http://ollama.lan:11434"

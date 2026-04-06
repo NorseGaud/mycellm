@@ -6,6 +6,7 @@ import {
   CheckCircle,
   AlertTriangle,
   Monitor,
+  HardDrive,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/api/client'
@@ -60,6 +61,7 @@ export function ModelBrowser({ selectedDevice }: ModelBrowserProps) {
   const [suggestions, setSuggestions] = useState<SuggestedModel[] | null>(null)
   const [nodeResources, setNodeResources] = useState<NodeResources>({ ram_gb: 0, disk_free_gb: 0 })
   const [expandedRepo, setExpandedRepo] = useState<string | null>(null)
+  const [localFileNames, setLocalFileNames] = useState<string[]>([])
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
 
   const isRemote = selectedDevice !== ''
@@ -87,6 +89,13 @@ export function ModelBrowser({ selectedDevice }: ModelBrowserProps) {
       .catch(() => {})
   }, [nodeGet])
 
+  // Fetch local files list to show "downloaded" badges
+  useEffect(() => {
+    nodeGet<{ files?: { filename: string }[] }>(API.models.localFiles)
+      .then((d) => setLocalFileNames((d.files || []).map((f) => f.filename)))
+      .catch(() => {})
+  }, [nodeGet])
+
   // Reset when device changes
   useEffect(() => {
     setSearchResults([])
@@ -106,7 +115,16 @@ export function ModelBrowser({ selectedDevice }: ModelBrowserProps) {
         node_ram_gb?: number
         node_disk_free_gb?: number
       }>(`${API.models.search}?q=${encodeURIComponent(searchQuery)}&limit=12`)
-      setSearchResults(data.models || [])
+      // Sort: prefer prefix/substring matches over pure popularity
+      const q = searchQuery.toLowerCase()
+      const sorted = (data.models || []).sort((a, b) => {
+        const aName = a.repo_id.split('/').pop()?.toLowerCase() || ''
+        const bName = b.repo_id.split('/').pop()?.toLowerCase() || ''
+        const aScore = (aName.startsWith(q) ? 100 : 0) + (aName.includes(q) ? 50 : 0) + (a.downloads / 100000)
+        const bScore = (bName.startsWith(q) ? 100 : 0) + (bName.includes(q) ? 50 : 0) + (b.downloads / 100000)
+        return bScore - aScore
+      })
+      setSearchResults(sorted)
       if (data.node_ram_gb) {
         setNodeResources({
           ram_gb: data.node_ram_gb,
@@ -255,7 +273,10 @@ export function ModelBrowser({ selectedDevice }: ModelBrowserProps) {
                           />
                         </td>
                         <td className="py-2 pr-2">
-                          <div className="font-mono text-sm text-white truncate max-w-[250px]">
+                          <div className="font-mono text-sm text-white truncate max-w-[250px] flex items-center gap-1.5" title={m.repo_id}>
+                            {localFileNames.some((f) => f.toLowerCase().includes(m.repo_id.split('/').pop()?.split('-gguf')[0]?.toLowerCase() || '___')) && (
+                              <span title={t('browser.onDisk', 'Downloaded')}><HardDrive size={10} className="text-spore shrink-0" /></span>
+                            )}
                             {m.repo_id}
                           </div>
                         </td>

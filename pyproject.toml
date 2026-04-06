@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mycellm"
-version = "0.2.2"
+version = "0.2.3-dev"
 description = "Distributed LLM inference across heterogeneous hardware"
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,7 +43,7 @@ dependencies = [
 
 [project.optional-dependencies]
 inference = [
-    "llama-cpp-python>=0.3",
+    "llama-cpp-python>=0.3.19",
 ]
 postgres = [
     "asyncpg>=0.29",

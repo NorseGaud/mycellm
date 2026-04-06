@@ -1,6 +1,6 @@
 import { useState, useEffect, Fragment, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Pencil, Trash2, Play, Square, RotateCw, X } from 'lucide-react'
+import { Pencil, Trash2, Play, Square, RotateCw, X, XCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/api/client'
 import { API } from '@/api/endpoints'
@@ -360,6 +360,16 @@ export function ModelTable({ selectedDevice }: ModelTableProps) {
     } catch {}
   }
 
+  const handleDismiss = async (name: string) => {
+    try {
+      // Clear from load-status tracker (handles failed/stuck entries)
+      await nodePost(API.models.clearLoadStatus, { model: name })
+      // Also try removing saved config if it exists
+      try { await nodePost(API.models.removeConfig, { model: name }) } catch {}
+      refreshAll()
+    } catch {}
+  }
+
   const handleToggleScope = async (m: MergedModel) => {
     const next = m.scope === 'public' ? 'home' : 'public'
     try {
@@ -443,7 +453,7 @@ export function ModelTable({ selectedDevice }: ModelTableProps) {
                 <td className="py-2.5 px-4" title={m.state}>
                   <StateIndicator state={m.state} />
                 </td>
-                <td className={cn('py-2.5 px-4 font-mono', STATE_NAME_COLOR[m.state])}>
+                <td className={cn('py-2.5 px-4 font-mono truncate max-w-[300px]', STATE_NAME_COLOR[m.state])} title={m.name}>
                   {m.name}
                   {m.state === 'loading' && (
                     <div className="mt-1 space-y-1">
@@ -553,6 +563,42 @@ export function ModelTable({ selectedDevice }: ModelTableProps) {
                         </button>
                       )}
                     </>
+                  )}
+                  {m.state === 'failed' && (
+                    <>
+                      <button
+                        onClick={() => handleLoad(m)}
+                        className="text-xs text-ledger hover:text-ledger/80 transition-colors"
+                        title={t('table.retry', 'Retry')}
+                      >
+                        <RotateCw className="w-3 h-3 inline" />
+                      </button>
+                      {m.hasFile && (
+                        <button
+                          onClick={() => handleDelete(m)}
+                          className="text-xs text-gray-600 hover:text-compute transition-colors"
+                          title={t('table.delete', 'Delete file')}
+                        >
+                          <Trash2 className="w-3 h-3 inline" />
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleDismiss(m.name)}
+                        className="text-xs text-gray-600 hover:text-compute transition-colors"
+                        title={t('table.dismiss', 'Dismiss')}
+                      >
+                        <XCircle className="w-3 h-3 inline" />
+                      </button>
+                    </>
+                  )}
+                  {m.state === 'loading' && (
+                    <button
+                      onClick={() => handleDismiss(m.name)}
+                      className="text-xs text-gray-600 hover:text-compute transition-colors"
+                      title={t('table.cancel', 'Cancel')}
+                    >
+                      <XCircle className="w-3 h-3 inline" />
+                    </button>
                   )}
                   {m.state === 'on-disk' && (
                     <>
