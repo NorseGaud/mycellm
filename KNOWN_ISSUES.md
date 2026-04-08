@@ -1,6 +1,19 @@
 # mycellm — Known Issues
 
-*Last updated: March 28, 2026 (v0.2.1)*
+*Last updated: April 8, 2026 (v0.2.4)*
+
+## Fixed in 0.2.4
+
+### ~~Ollama SDK clients get 404 for all models~~
+Tools using the Ollama SDK (OpenClaw, ollama-python, etc.) call `/api/show` and `/api/tags` instead of the OpenAI-compatible `/v1/models`. mycellm had no Ollama-compatible endpoints, returning HTML (SPA fallback) or 404. **Fixed**: Added full Ollama API compatibility at `/api/tags`, `/api/show`, and `/api/chat`.
+
+## Fixed in 0.2.3
+
+### ~~Relay model prefix multiplication~~
+When relaying models between nodes, model names accumulated `relay:` prefixes (e.g., `relay:relay:relay:model`). **Fixed**: Relay discovery skips models with existing `relay:` prefix and non-local models from remote endpoints.
+
+### ~~OpenAI clients can't find `auto` model~~
+`GET /v1/models` didn't list the virtual `auto` model, and `GET /v1/models/auto` returned 404. **Fixed**: `auto` is now listed in model endpoints and retrievable by ID.
 
 ## Fixed in 0.2.1
 

@@ -1,12 +1,19 @@
 # API Overview
 
-mycellm exposes an **OpenAI-compatible REST API** on port 8420. Any tool that works with the OpenAI API works with mycellm.
+mycellm exposes an **OpenAI-compatible REST API** on port 8420. Any tool that works with the OpenAI API works with mycellm. An **Ollama-compatible API** is also available for tools that use the Ollama SDK.
 
-## Base URL
+## Base URLs
 
 ```
-http://localhost:8420/v1
+http://localhost:8420/v1    # OpenAI-compatible
+http://localhost:8420/api   # Ollama-compatible
 ```
+
+## The `auto` Model
+
+Use `model: "auto"` to let mycellm route to the best available model
+across all local, peer, and fleet nodes. This works in both the OpenAI
+and Ollama APIs.
 
 ## Authentication
 
@@ -26,6 +33,7 @@ Public endpoints (`/health`, `/metrics`, `/v1/public/*`) never require auth.
 |--------|------|------|-------------|
 | POST | `/v1/chat/completions` | Yes | Chat completions (streaming supported) |
 | GET | `/v1/models` | Yes | List available models |
+| GET | `/v1/models/{id}` | Yes | Retrieve a single model |
 | POST | `/v1/embeddings` | Yes | Text embeddings |
 
 ### Public (no auth)
@@ -61,6 +69,17 @@ Public endpoints (`/health`, `/metrics`, `/v1/public/*`) never require auth.
 | POST | `/v1/admin/nodes/announce` | Node announcement |
 | GET | `/v1/admin/nodes` | List fleet nodes |
 | POST | `/v1/admin/nodes/{id}/approve` | Approve pending node |
+
+### Ollama-Compatible
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/tags` | List models (Ollama format) |
+| POST | `/api/show` | Model info (Ollama format) |
+| POST | `/api/chat` | Chat completion (Ollama format) |
+
+These endpoints allow Ollama SDK clients (OpenClaw, etc.) to use mycellm
+as a drop-in Ollama replacement without configuration changes.
 
 ## Interactive docs
 
