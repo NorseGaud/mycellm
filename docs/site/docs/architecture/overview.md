@@ -62,3 +62,21 @@ API (/v1/chat/completions)
 - **Prometheus**: `/metrics` endpoint for scraping
 - **Telemetry**: Opt-in anonymous counters to bootstrap
 - **Logs**: SSE stream at `/v1/node/logs/stream`
+
+## Roadmap: Beyond Inference
+
+mycellm is a protocol layer — like BitTorrent for LLM compute. The
+transport, identity, routing, and accounting primitives are workload-agnostic.
+Future workloads that compose with the existing protocol:
+
+- **Federated LoRA fine-tuning**: Nodes train adapters locally, share only
+  small weight deltas. Coordinator aggregates rounds. No raw data leaves nodes.
+- **P2P model distribution**: BitTorrent-style chunked GGUF transfer over
+  QUIC, with integrity verification.
+- **Distributed eval swarms**: Fan-out benchmark tasks as inference requests,
+  aggregate scores.
+- **Mixture-of-Experts routing**: Content-aware dispatch to specialized
+  adapters across the network.
+
+See [Spec Evolution — Phase 7](../../../spec-evolution.md#phase-7-protocol-composable-workloads-roadmap)
+for detailed design notes and protocol mapping.

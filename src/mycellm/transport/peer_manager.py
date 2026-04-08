@@ -255,6 +255,29 @@ class PeerManager:
                     entry = self._node.registry.get(peer_hello.peer_id)
                     if entry:
                         entry.record_address_success(peer.addr)
+                        entry.network_ids = peer_hello.network_ids
+
+                    # Auto-join networks advertised by bootstrap peers.
+                    # When connecting to a bootstrap, any network it belongs to
+                    # is assumed public/joinable — this is how new nodes
+                    # automatically participate in the public network.
+                    if peer.is_bootstrap and self._node.federation and peer_hello.network_ids:
+                        my_networks = set(self._node.federation.network_ids)
+                        for net_id in peer_hello.network_ids:
+                            if net_id not in my_networks:
+                                try:
+                                    self._node.federation.join_network(
+                                        network_id=net_id,
+                                        network_name=f"bootstrap-{net_id[:8]}",
+                                        role="seeder",
+                                        bootstrap_addrs=[peer.addr],
+                                    )
+                                    logger.info(
+                                        f"{styled_tag('P2P')} Auto-joined network {net_id[:12]}... "
+                                        f"from bootstrap {peer.addr}"
+                                    )
+                                except Exception as e:
+                                    logger.debug(f"Auto-join network {net_id[:12]}... failed: {e}")
 
                     logger.info(
                         f"{styled_tag('P2P')} Connected to {peer.addr} "

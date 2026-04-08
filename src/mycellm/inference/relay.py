@@ -173,6 +173,18 @@ class RelayManager:
             if not model_id:
                 continue
 
+            # Skip models that are themselves relayed from other peers —
+            # only register the remote node's own local models to prevent
+            # relay:relay:relay: prefix multiplication across the network.
+            if model_id.startswith("relay:"):
+                continue
+
+            # Also skip fleet/peer models (owned_by != "local") if metadata available
+            if isinstance(model, dict):
+                owned_by = model.get("owned_by", "local")
+                if owned_by and owned_by != "local" and not owned_by.startswith("system"):
+                    continue
+
             # Prefix with relay: to avoid name collisions
             relay_name = f"relay:{model_id}"
 

@@ -697,11 +697,73 @@ async def model_capabilities(request: Request):
     return {"models": models}
 
 
+@router.get("/models/{model_id}")
+async def retrieve_model(request: Request, model_id: str):
+    """Retrieve a single model by ID (OpenAI-compatible)."""
+    node = request.app.state.node
+
+    # "auto" is a virtual model — always available when any model is reachable
+    if model_id == "auto":
+        return {
+            "id": "auto",
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "mycellm",
+        }
+
+    # Check local models
+    for m in node.inference.loaded_models:
+        if m.name == model_id:
+            return {
+                "id": m.name,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "local",
+            }
+
+    # Check QUIC peers
+    for entry in node.registry.connected_peers():
+        for m in entry.capabilities.models:
+            if m.name == model_id:
+                return {
+                    "id": m.name,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": f"peer:{entry.peer_id[:8]}",
+                }
+
+    # Check fleet
+    for entry in node.node_registry.values():
+        if entry.get("status") != "approved":
+            continue
+        caps = entry.get("capabilities", {})
+        for m in caps.get("models", []):
+            name = m.get("name", m) if isinstance(m, dict) else m
+            if name == model_id:
+                return {
+                    "id": name,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": f"fleet:{entry.get('node_name', entry.get('peer_id', '')[:8])}",
+                }
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=404, content={"error": "not found"})
+
+
 @router.get("/models")
 async def list_models(request: Request):
     """List available models (local + remote via QUIC + fleet via registry)."""
     node = request.app.state.node
     models = []
+
+    # Virtual "auto" model — mycellm auto-selects the best available
+    models.append({
+        "id": "auto",
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "mycellm",
+    })
 
     # Local models
     for m in node.inference.loaded_models:

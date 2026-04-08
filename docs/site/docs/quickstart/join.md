@@ -9,6 +9,27 @@ mycellm serve
 
 Your node auto-announces to the bootstrap, gets auto-approved (public network), and appears on the [stats page](https://stats.mycellm.dev) within 60 seconds.
 
+When connecting to a bootstrap peer, your node automatically joins any
+networks the bootstrap belongs to. This means a fresh `mycellm init` +
+`mycellm serve` with the default bootstrap will join the public network
+without any manual federation steps.
+
+## Multi-network federation
+
+A node can belong to multiple networks simultaneously — for example, a
+trusted private homelab network *and* the public network:
+
+```bash
+# Already running on the public network. Join a private homelab too:
+curl -X POST localhost:8420/v1/node/federation/join \
+  -H "Content-Type: application/json" \
+  -d '{"network_id": "<homelab-network-id>", "network_name": "homelab", "role": "seeder"}'
+```
+
+Nodes advertise all their network IDs during QUIC handshake. Trust is
+resolved per-peer based on shared network memberships — homelab peers
+get `full` trust, public peers get `untrusted`.
+
 ## Private network
 
 Create your own network:
