@@ -21,6 +21,9 @@ class InferenceRequest:
     presence_penalty: float = 0
     seed: int | None = None
     response_format: dict | None = None
+    grammar: str | None = None  # GBNF grammar for constrained output
+    priority: str = "normal"  # "normal", "high", "speculative"
+    request_group: str = ""  # for batch cancellation
 
 
 @dataclass

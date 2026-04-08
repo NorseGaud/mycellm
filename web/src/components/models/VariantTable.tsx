@@ -6,6 +6,9 @@ import {
   XCircle,
   AlertTriangle,
   HardDrive,
+  Loader2,
+  X,
+  Info,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { api } from '@/api/client'
@@ -65,6 +68,8 @@ export function VariantTable({ repoId, selectedDevice }: VariantTableProps) {
   const [downloadStatus, setDownloadStatus] = useState<Record<string, DownloadStatus>>({})
   const [localFiles, setLocalFiles] = useState<LocalFileEntry[]>([])
   const [filterCompatible, setFilterCompatible] = useState(true)
+  const [startingDownloads, setStartingDownloads] = useState<Set<string>>(new Set())
+  const [showQuantGuide, setShowQuantGuide] = useState(false)
 
   const isRemote = selectedDevice !== ''
 
@@ -123,6 +128,8 @@ export function VariantTable({ repoId, selectedDevice }: VariantTableProps) {
 
   const handleDownload = async (file: RepoFilesData['files'][0]) => {
     if (!repoFiles) return
+    // Instant feedback — show spinner before API responds
+    setStartingDownloads((prev) => new Set(prev).add(file.filename))
     try {
       const data = await nodePost<{ download_id?: string } & DownloadStatus>(
         API.models.download,
@@ -141,6 +148,22 @@ export function VariantTable({ repoId, selectedDevice }: VariantTableProps) {
           [data.download_id!]: data as DownloadStatus,
         }))
       }
+    } catch {}
+    setStartingDownloads((prev) => {
+      const next = new Set(prev)
+      next.delete(file.filename)
+      return next
+    })
+  }
+
+  const handleAbort = async (downloadId: string) => {
+    try {
+      await nodePost(API.models.abortDownload, { download_id: downloadId })
+      setDownloadStatus((prev) => {
+        const next = { ...prev }
+        if (next[downloadId]) next[downloadId] = { ...next[downloadId], status: 'failed' as const }
+        return next
+      })
     } catch {}
   }
 
@@ -198,11 +221,41 @@ export function VariantTable({ repoId, selectedDevice }: VariantTableProps) {
         </button>
       </div>
 
+      {showQuantGuide && (
+        <div className="mb-2 p-3 rounded-lg bg-void border border-white/5 text-xs text-gray-400 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-gray-300 uppercase text-[10px]">{t('variants.quantGuideTitle', 'Quantization Guide')}</span>
+            <button onClick={() => setShowQuantGuide(false)} className="text-gray-600 hover:text-white"><X size={10} /></button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1">
+            <div><span className="text-spore font-mono">Q4_K_M</span> — {t('variants.q4km', 'Best balance of quality and size. Recommended for most use.')}</div>
+            <div><span className="text-spore font-mono">Q4_K_S</span> — {t('variants.q4ks', 'Slightly smaller than Q4_K_M, minimal quality loss.')}</div>
+            <div><span className="text-ledger font-mono">Q5_K_M</span> — {t('variants.q5km', 'Higher quality, ~25% larger. Good if you have the RAM.')}</div>
+            <div><span className="text-ledger font-mono">Q6_K</span> — {t('variants.q6k', 'Near-original quality. Large — needs plenty of RAM.')}</div>
+            <div><span className="text-relay font-mono">Q8_0</span> — {t('variants.q80', 'Highest quality quant. 2x size of Q4. For large-RAM machines.')}</div>
+            <div><span className="text-gray-500 font-mono">Q3_K_M</span> — {t('variants.q3km', 'Very small but noticeable quality drop. For tight RAM.')}</div>
+            <div><span className="text-gray-500 font-mono">Q2_K</span> — {t('variants.q2k', 'Smallest. Significant quality loss. Last resort.')}</div>
+            <div><span className="text-compute font-mono">F16</span> — {t('variants.f16', 'Full precision. Huge. Only for testing or very high-end hardware.')}</div>
+          </div>
+          <div className="text-gray-600 text-[10px] pt-1">
+            {t('variants.quantNote', 'K = k-quant (grouped quantization). M = medium, S = small. UD = ultra-dense (newer technique). Higher number = more bits = better quality but larger.')}
+          </div>
+        </div>
+      )}
+
       <table className="w-full text-xs">
         <thead>
           <tr className="text-gray-600 font-mono uppercase">
             <th className="text-left py-1 pr-2 w-20">
-              {t('variants.quant', 'Quant')}
+              <span className="inline-flex items-center gap-1">
+                {t('variants.quant', 'Quant')}
+                <button
+                  onClick={() => setShowQuantGuide((v) => !v)}
+                  className="text-gray-600 hover:text-gray-400"
+                >
+                  <Info size={10} />
+                </button>
+              </span>
             </th>
             <th className="text-left py-1 pr-2">
               {t('variants.quality', 'Quality')}
@@ -293,6 +346,13 @@ export function VariantTable({ repoId, selectedDevice }: VariantTableProps) {
                             : `${Math.round(dl.eta_s)}s`}
                         </span>
                       )}
+                      <button
+                        onClick={() => handleAbort(dl.download_id)}
+                        className="text-gray-600 hover:text-compute ml-1"
+                        title={t('variants.abort', 'Cancel download')}
+                      >
+                        <X size={10} />
+                      </button>
                     </div>
                   ) : isOnDisk || (dl && dl.status === 'complete') ? (
                     <span className="inline-flex items-center space-x-1">
@@ -311,6 +371,11 @@ export function VariantTable({ repoId, selectedDevice }: VariantTableProps) {
                     <span className="inline-flex items-center space-x-1 text-compute">
                       <XCircle className="w-3 h-3" />
                       <span>{t('variants.failed', 'failed')}</span>
+                    </span>
+                  ) : startingDownloads.has(f.filename) ? (
+                    <span className="inline-flex items-center space-x-1 text-ledger animate-pulse">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>{t('variants.starting', 'starting...')}</span>
                     </span>
                   ) : hasWarnings ? (
                     <button

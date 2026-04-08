@@ -186,6 +186,14 @@ async def credit_history(request: Request, limit: int = 50):
     return {"transactions": []}
 
 
+@router.delete("/requests/group/{group_id}")
+async def cancel_request_group(group_id: str, request: Request):
+    """Cancel all pending/active requests in a group."""
+    node = request.app.state.node
+    count = await node.inference.cancel_group(group_id)
+    return {"cancelled": count, "group": group_id}
+
+
 @router.post("/models/load")
 async def load_model(request: Request):
     """Load a model.
@@ -293,6 +301,18 @@ async def model_load_status(request: Request):
             entry["elapsed"] = round(time.time() - s.get("started_at", 0), 1)
         statuses.append(entry)
     return {"statuses": statuses}
+
+
+@router.post("/models/load-status/clear")
+async def clear_load_status(request: Request):
+    """Clear a model from the load status tracker (dismiss failed/stale entries)."""
+    node = request.app.state.node
+    body = await request.json()
+    model = body.get("model", "")
+    if model and model in node.inference._load_status:
+        del node.inference._load_status[model]
+        return {"status": "cleared", "model": model}
+    return {"error": "not found"}
 
 
 @router.get("/models/saved")

@@ -96,3 +96,39 @@ def test_invite_unlimited_uses():
     token = InviteToken(network_id="net1", max_uses=0)
     token.uses = 9999
     assert token.is_valid  # 0 = unlimited
+
+
+def test_join_network_idempotent(tmp_path):
+    """Joining the same network twice overwrites the membership, doesn't duplicate."""
+    fm = FederationManager(tmp_path)
+    fm.init_network(b'\x00' * 32, network_name="home")
+    fm.join_network("net-pub", network_name="Public v1", role="seeder")
+    fm.join_network("net-pub", network_name="Public v2", role="seeder")
+    assert fm.network_ids.count("net-pub") == 1
+    assert fm.get_membership("net-pub").network_name == "Public v2"
+
+
+def test_join_network_with_bootstrap_addrs(tmp_path):
+    """Membership stores bootstrap_addrs for traceability."""
+    fm = FederationManager(tmp_path)
+    fm.init_network(b'\x00' * 32, network_name="home")
+    m = fm.join_network(
+        "net-pub",
+        network_name="Public",
+        role="seeder",
+        bootstrap_addrs=["96.126.98.204:8421"],
+    )
+    assert m.bootstrap_addrs == ["96.126.98.204:8421"]
+
+
+def test_network_identity_trust_level(tmp_path):
+    """Network identity preserves trust_level through save/load."""
+    identity = NetworkIdentity(
+        network_id="abc",
+        network_name="homelab",
+        trust_level="full",
+    )
+    path = tmp_path / "network.json"
+    identity.save(path)
+    loaded = NetworkIdentity.load(path)
+    assert loaded.trust_level == "full"

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from pathlib import Path
 from typing import AsyncIterator
 
 from mycellm.inference.base import (
@@ -19,6 +20,107 @@ from mycellm.inference.base import (
 )
 
 logger = logging.getLogger("mycellm.inference")
+
+
+class LlamaGGUFDraftModel:
+    """Draft model for speculative decoding using a small GGUF model.
+
+    Loads a small model (e.g. 1.5B) and uses it to predict the next N tokens.
+    The main model then verifies these predictions in a single batch forward pass.
+    When predictions are accepted (typically 50-70% for code), the effective
+    throughput of the main model increases 1.5-2x.
+
+    Uses create_completion with prompt=input_ids for token prediction.
+    """
+
+    def __init__(self, model_path: str, num_pred_tokens: int = 8, n_ctx: int = 2048):
+        from llama_cpp import Llama
+
+        self.num_pred_tokens = num_pred_tokens
+        logger.info(f"Loading draft model: {Path(model_path).stem} (pred_tokens={num_pred_tokens})")
+        self._llm = Llama(
+            model_path=model_path,
+            n_ctx=n_ctx,
+            n_gpu_layers=-1,
+            flash_attn=True,
+            n_threads=_detect_optimal_threads() or 4,
+            logits_all=True,
+            verbose=False,
+        )
+        logger.info("Draft model loaded")
+
+    def __call__(self, input_ids, /, **kwargs):
+        """Predict next tokens given the current sequence."""
+        import numpy as np
+
+        if len(input_ids) == 0:
+            return np.array([], dtype=np.intc)
+
+        try:
+            # Use the model to predict next tokens via create_completion
+            # Feed input_ids as the prompt (token-level)
+            max_input = min(len(input_ids), self._llm.n_ctx() - self.num_pred_tokens - 1)
+            prompt_tokens = input_ids[-max_input:].tolist()
+
+            output = self._llm.create_completion(
+                prompt=prompt_tokens,
+                max_tokens=self.num_pred_tokens,
+                temperature=0.0,  # greedy for max acceptance
+                top_k=1,
+            )
+
+            # Extract generated token IDs from the output
+            text = output.get("choices", [{}])[0].get("text", "")
+            if text:
+                # Tokenize the output text to get token IDs
+                token_ids = self._llm.tokenize(text.encode(), add_bos=False)
+                return np.array(token_ids[:self.num_pred_tokens], dtype=np.intc)
+
+        except Exception as e:
+            logger.debug(f"Draft model prediction failed: {e}")
+
+        return np.array([], dtype=np.intc)
+
+
+def _detect_optimal_threads() -> int:
+    """Detect optimal thread count based on platform.
+
+    Apple Silicon: use performance cores only (not efficiency cores).
+    Linux: use physical cores (not hyperthreaded logical cores).
+    """
+    import platform
+    import subprocess
+
+    try:
+        if platform.system() == "Darwin" and platform.machine() == "arm64":
+            # Apple Silicon: p-core count via sysctl
+            r = subprocess.run(
+                ["sysctl", "-n", "hw.perflevel0.logicalcpu"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                cores = int(r.stdout.strip())
+                logger.info(f"Apple Silicon detected: {cores} p-cores")
+                return cores
+
+        if platform.system() == "Linux":
+            import os
+            # Physical cores (not hyperthreaded)
+            try:
+                with open("/proc/cpuinfo") as f:
+                    cores = len(set(
+                        line.split(":")[1].strip()
+                        for line in f if line.startswith("physical id")
+                    )) or 1
+                logical = os.cpu_count() or 4
+                physical = max(1, logical // 2)  # rough estimate
+                return physical
+            except Exception:
+                return max(1, (os.cpu_count() or 4) // 2)
+    except Exception:
+        pass
+
+    return 0  # let llama.cpp decide
 
 
 class LlamaCppBackend(InferenceBackend):
@@ -37,9 +139,15 @@ class LlamaCppBackend(InferenceBackend):
         n_gpu_layers = kwargs.get("n_gpu_layers", -1)  # -1 = auto
         progress_callback = kwargs.get("progress_callback")
 
+        flash_attn = kwargs.get("flash_attn", True)
+        kv_quant = kwargs.get("kv_cache_quant", "q8_0")
+        kv_quant_k = kwargs.get("kv_cache_quant_k", "")
+        kv_quant_v = kwargs.get("kv_cache_quant_v", "")
+        prompt_lookup = kwargs.get("prompt_lookup", False)
+        n_threads = kwargs.get("n_threads", 0)
+
         logger.info(f"Loading model {model_name} from {model_path}")
 
-        # Use progress_callback if the installed llama-cpp-python supports it
         extra_kwargs = {}
         if progress_callback:
             llama_params = inspect.signature(Llama.__init__).parameters
@@ -49,16 +157,76 @@ class LlamaCppBackend(InferenceBackend):
                     return True
                 extra_kwargs["progress_callback"] = _on_progress
 
-        llm = await asyncio.to_thread(
-            Llama,
-            model_path=model_path,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=False,
-            **extra_kwargs,
-        )
+        # Flash attention (Metal/CUDA optimized attention kernel)
+        if flash_attn:
+            extra_kwargs["flash_attn"] = True
+
+        # Asymmetric KV cache quantization — keys need higher precision than values
+        # Default: K=q8_0 (higher precision), V=q4_0 (lower OK) — 59% less KV memory
+        try:
+            from llama_cpp import GGML_TYPE_Q8_0, GGML_TYPE_Q4_0
+            kv_types = {"q8_0": GGML_TYPE_Q8_0, "q4_0": GGML_TYPE_Q4_0}
+
+            effective_k = kv_quant_k or kv_quant or "q8_0"
+            effective_v = kv_quant_v or ("q4_0" if kv_quant_k or not kv_quant_v else kv_quant) or "q4_0"
+
+            if effective_k in kv_types:
+                extra_kwargs["type_k"] = kv_types[effective_k]
+            if effective_v in kv_types:
+                extra_kwargs["type_v"] = kv_types[effective_v]
+            logger.info(f"KV cache: K={effective_k}, V={effective_v}")
+        except ImportError:
+            pass
+
+        # Thread count — auto-detect p-cores on Apple Silicon
+        if n_threads <= 0:
+            n_threads = _detect_optimal_threads()
+        if n_threads > 0:
+            extra_kwargs["n_threads"] = n_threads
+            extra_kwargs["n_threads_batch"] = n_threads
+            logger.info(f"Threads: {n_threads}")
+
+        # Speculative decoding — draft model predicts, main model verifies in batch
+        draft_model_path = kwargs.get("draft_model_path", "")
+        draft_pred_tokens = kwargs.get("draft_pred_tokens", 8)
+        if draft_model_path and Path(draft_model_path).exists():
+            extra_kwargs["draft_model"] = LlamaGGUFDraftModel(
+                model_path=draft_model_path,
+                num_pred_tokens=draft_pred_tokens,
+                n_ctx=min(n_ctx, 2048),
+            )
+            logger.info(f"Speculative decoding: draft={Path(draft_model_path).stem}")
+        elif prompt_lookup:
+            # Fallback: prompt lookup (n-gram based, no extra model)
+            try:
+                from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+                extra_kwargs["draft_model"] = LlamaPromptLookupDecoding(num_pred_tokens=10)
+                logger.info("Prompt lookup decoding enabled")
+            except ImportError:
+                pass
+
+        try:
+            llm = await asyncio.to_thread(
+                Llama,
+                model_path=model_path,
+                n_ctx=n_ctx,
+                n_gpu_layers=n_gpu_layers,
+                verbose=False,
+                **extra_kwargs,
+            )
+        except Exception as e:
+            err_msg = str(e)
+            # Detect model load failures — often caused by unsupported architecture
+            if "failed to load model" in err_msg.lower():
+                model_name_short = model_path.split("/")[-1]
+                raise RuntimeError(
+                    f"Failed to load {model_name_short}. This may be an unsupported model "
+                    f"architecture. Try: pip install --upgrade llama-cpp-python"
+                ) from e
+            raise
+
         self._models[model_name] = llm
-        logger.info(f"Model {model_name} loaded")
+        logger.info(f"Model {model_name} loaded (flash_attn={flash_attn}, kv_quant={kv_quant})")
 
     async def unload_model(self, model_name: str) -> None:
         model = self._models.pop(model_name, None)
@@ -83,6 +251,12 @@ class LlamaCppBackend(InferenceBackend):
             extra_kwargs["seed"] = request.seed
         if request.response_format:
             extra_kwargs["response_format"] = request.response_format
+        if request.grammar:
+            try:
+                from llama_cpp import LlamaGrammar
+                extra_kwargs["grammar"] = LlamaGrammar.from_string(request.grammar)
+            except (ImportError, Exception) as e:
+                logger.warning(f"Grammar constraint ignored: {e}")
         response = await asyncio.to_thread(
             llm.create_chat_completion,
             messages=request.messages,
@@ -127,6 +301,12 @@ class LlamaCppBackend(InferenceBackend):
             extra_kwargs["seed"] = request.seed
         if request.response_format:
             extra_kwargs["response_format"] = request.response_format
+        if request.grammar:
+            try:
+                from llama_cpp import LlamaGrammar
+                extra_kwargs["grammar"] = LlamaGrammar.from_string(request.grammar)
+            except (ImportError, Exception) as e:
+                logger.warning(f"Grammar constraint ignored: {e}")
 
         def _run_stream():
             try:
