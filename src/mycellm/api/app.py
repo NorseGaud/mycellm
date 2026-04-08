@@ -162,6 +162,12 @@ def create_app(node: MycellmNode) -> FastAPI:
     app.include_router(models_router, prefix="/v1/node/models")
     app.include_router(gateway_router, prefix="/v1/public")
 
+    # Ollama-compatible API routes
+    # Clients like OpenClaw use the Ollama SDK which calls /api/tags,
+    # /api/show, and /api/chat instead of the OpenAI-compatible endpoints.
+    from mycellm.api.ollama_compat import ollama_router
+    app.include_router(ollama_router, prefix="/api")
+
     # Health check (always public — includes auth posture for clients)
     @app.get("/health")
     async def health():
