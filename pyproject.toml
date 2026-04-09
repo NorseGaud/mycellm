@@ -51,6 +51,7 @@ postgres = [
 dev = [
     "pytest",
     "pytest-asyncio",
+    "pytest-anyio",
     "httpx>=0.27",
     "ruff",
 ]
