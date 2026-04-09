@@ -8,10 +8,10 @@ import time
 import uuid
 from typing import Optional
 
-logger = logging.getLogger("mycellm.api")
-
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger("mycellm.api")
 
 
 def _find_alternative_model(node, busy_model: str) -> str | None:
@@ -85,7 +85,6 @@ class ChatCompletionResponse(BaseModel):
 async def chat_completions(request: Request, body: ChatCompletionRequest):
     """OpenAI-compatible chat completions endpoint."""
     from fastapi.responses import JSONResponse
-    from mycellm.router.model_resolver import ModelResolver
     from mycellm.activity import EventType
 
     node = request.app.state.node
